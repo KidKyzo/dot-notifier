@@ -4,7 +4,6 @@
 [![Tauri 2](https://img.shields.io/badge/Tauri-v2-FFC131?logo=tauri&logoColor=black)](https://tauri.app/)
 [![React](https://img.shields.io/badge/React-v19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/badge/Release-v0.1.0-brightgreen.svg)](https://github.com/KidKyzo/dot-notifier/releases)
 
 A lightweight, non-intrusive Windows desktop overlay designed for multi-tasking developers. Dot Notifier places ambient, minimal indicators in your screen corner to track **AI Agent progress**, **Windows notifications**, and **system performance**—expanding into informative pills and panels only when you need them.
@@ -158,9 +157,3 @@ Dot Notifier comes with bridge scripts for agent hooks located under `scripts/`:
 - `codex-notify.ps1`: Integration hook for Codex agent lifecycle events.
 - `claude-notify.ps1`: Bridge hook for Claude notifications.
 - `antigravity-notify.ps1`: Bridge hook for Antigravity notifications.
-
----
-
-## License
-
-This project is licensed under the [MIT License](LICENSE).
