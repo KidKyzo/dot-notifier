@@ -1,0 +1,17 @@
+{
+  "valid": {
+    "type": "agent-turn-complete",
+    "thread-id": "550e8400-e29b-41d4-a716-446655440000",
+    "turn-id": "8d868b8e-3f11-4baa-97c2-e91d36b8b2a9",
+    "last-assistant-message": "Updated the token refresh flow and verified the auth tests."
+  },
+  "malformed": {
+    "type": "agent-turn-complete",
+    "thread-id": "not-a-uuid"
+  },
+  "unknownFields": {
+    "type": "agent-turn-complete",
+    "thread-id": "550e8400-e29b-41d4-a716-446655440001",
+    "future-field": { "content": "ignored" }
+  }
+}

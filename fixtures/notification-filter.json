@@ -1,0 +1,12 @@
+{
+  "valid": {
+    "monitoredApps": ["WhatsApp", "Telegram"]
+  },
+  "malformed": {
+    "monitoredApps": "WhatsApp"
+  },
+  "unknownFields": {
+    "monitoredApps": ["WhatsApp"],
+    "futureSetting": true
+  }
+}

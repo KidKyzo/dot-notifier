@@ -1,0 +1,7 @@
+{
+  "started": "{\"timestamp\":\"2026-10-09T12:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-1\"}}",
+  "failed": "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"error\":{\"message\":\"private failure detail\"}}}",
+  "malformed": "{not json",
+  "message": "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"private transcript text\"}}",
+  "unknownFields": "{\"type\":\"event_msg\",\"unexpected\":\"ignored\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-1\",\"last_agent_message\":\"private transcript text\",\"extra\":true}}"
+}

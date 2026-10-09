@@ -1,0 +1,22 @@
+{
+  "valid": {
+    "id": 98765,
+    "appName": "WhatsApp",
+    "title": "Alex",
+    "body": "See you tomorrow!",
+    "createdAt": "2026-10-09T12:00:00Z"
+  },
+  "malformed": {
+    "id": "not-a-number",
+    "appName": "",
+    "title": ""
+  },
+  "unknownFields": {
+    "id": 98766,
+    "appName": "Telegram",
+    "title": "Group Chat",
+    "body": "Check this update",
+    "unknownField": 12345,
+    "futurePayload": { "nested": true }
+  }
+}
