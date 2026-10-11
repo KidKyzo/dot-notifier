@@ -16,4 +16,10 @@ describe("user settings", () => {
       getItem: () => JSON.stringify({ monitoredApps: [] }),
     }).monitoredApps).toEqual(["WhatsApp"]);
   });
+
+  it("keeps the optional extended modules off by default", () => {
+    expect(defaultSettings.nowPlayingEnabled).toBe(false);
+    expect(defaultSettings.whatsappCardEnabled).toBe(false);
+    expect(loadSettings({ getItem: () => "{}" })).toEqual(defaultSettings);
+  });
 });

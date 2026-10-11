@@ -26,6 +26,7 @@
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
     <rescap:Capability Name="userNotificationListener" />
+    <uap:Capability Name="globalMediaControl" />
   </Capabilities>
 
   <Applications>

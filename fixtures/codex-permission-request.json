@@ -1,0 +1,29 @@
+{
+  "valid": {
+    "hook_event_name": "PermissionRequest",
+    "session_id": "550e8400-e29b-41d4-a716-446655440000",
+    "cwd": "C:/work/app",
+    "model": "gpt-5-codex",
+    "permission_mode": "default",
+    "tool_name": "Bash",
+    "tool_input": { "command": "private command content" },
+    "transcript_path": null,
+    "turn_id": "turn-1"
+  },
+  "malformed": {
+    "hook_event_name": "PermissionRequest",
+    "session_id": "not-a-uuid"
+  },
+  "unknownFields": {
+    "hook_event_name": "PermissionRequest",
+    "session_id": "550e8400-e29b-41d4-a716-446655440001",
+    "cwd": "C:/work/app",
+    "model": "gpt-5-codex",
+    "permission_mode": "default",
+    "tool_name": "Bash",
+    "tool_input": { "command": "private command content" },
+    "transcript_path": null,
+    "turn_id": "turn-2",
+    "future_field": { "content": "ignored" }
+  }
+}

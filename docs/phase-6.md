@@ -24,9 +24,11 @@ official, stable source is available.
 
 - Codex is recognized through rollout lifecycle markers only. It does not
   estimate a percentage or expose model messages as progress.
-- Only rollout files modified in the last ten minutes are discovered. On
-  startup, a running task is restored when its file was modified in the last
-  three minutes.
+- Rollout files from the last 24 hours are discovered. On startup, a running
+  task is restored when its latest `task_started` timestamp is within three
+  minutes; file modification time is the fallback for older record formats.
+  This handles session files whose modification time does not advance with
+  appended lifecycle records.
 - Log structure is not a public compatibility contract. Unknown and malformed
   lines are ignored, and the normal `notify` completion adapter remains usable
   if rollout parsing stops matching a future Codex version.

@@ -1,6 +1,7 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -9,6 +10,29 @@ use crate::bus::Event;
 use crate::notification_filter::NotificationFilter;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
+const RESUME_GAP: Duration = Duration::from_secs(5);
+const WINDOWS_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
+
+#[derive(Default)]
+struct NotificationBaseline {
+    cutoff_ticks: Option<i64>,
+    existing_ids: HashSet<u32>,
+}
+
+impl NotificationBaseline {
+    fn reset(&mut self, cutoff_ticks: i64, existing_ids: HashSet<u32>) {
+        self.cutoff_ticks = Some(cutoff_ticks);
+        self.existing_ids = existing_ids;
+    }
+
+    fn ignores(&self, id: u32, created_at_ticks: Option<i64>) -> bool {
+        self.cutoff_ticks
+            .is_some_and(|cutoff| match created_at_ticks {
+                Some(created_at) => created_at < cutoff,
+                None => self.existing_ids.contains(&id),
+            })
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,6 +42,8 @@ pub struct RawNotification {
     pub title: String,
     pub body: Option<String>,
     pub created_at: Option<String>,
+    #[serde(default)]
+    pub created_at_ticks: Option<i64>,
 }
 
 pub fn start(app: AppHandle) {
@@ -47,11 +73,15 @@ fn poll_notifications(app: AppHandle) {
             .as_deref()
             .map(NotificationFilter::load)
             .unwrap_or_else(|| NotificationFilter::load(Path::new("")));
+        let mut baseline = NotificationBaseline::default();
+        let mut connected = false;
+        let mut last_success = Instant::now();
 
         loop {
             thread::sleep(POLL_INTERVAL);
 
             let Ok(listener) = UserNotificationListener::Current() else {
+                connected = false;
                 continue;
             };
 
@@ -59,16 +89,30 @@ fn poll_notifications(app: AppHandle) {
                 .GetAccessStatus()
                 .unwrap_or(UserNotificationListenerAccessStatus::Unspecified);
             if access_status != UserNotificationListenerAccessStatus::Allowed {
+                connected = false;
                 continue;
             }
 
             let Ok(notifications_op) = listener.GetNotificationsAsync(NotificationKinds::Toast)
             else {
+                connected = false;
                 continue;
             };
             let Ok(notifications) = notifications_op.join() else {
+                connected = false;
                 continue;
             };
+
+            let now = Instant::now();
+            if !connected || now.duration_since(last_success) > RESUME_GAP {
+                let existing_ids = (0..notifications.Size().unwrap_or(0))
+                    .filter_map(|index| notifications.GetAt(index).ok())
+                    .filter_map(|item| item.Id().ok())
+                    .collect();
+                baseline.reset(windows_now_ticks(), existing_ids);
+            }
+            connected = true;
+            last_success = now;
 
             for item in notifications {
                 let id = match item.Id() {
@@ -119,9 +163,13 @@ fn poll_notifications(app: AppHandle) {
                     title,
                     body,
                     created_at: None,
+                    created_at_ticks: item.CreationTime().ok().map(|time| time.UniversalTime),
                 };
 
                 if let Some(event) = event_from_raw(&raw) {
+                    if baseline.ignores(raw.id, raw.created_at_ticks) {
+                        continue;
+                    }
                     if filter.should_forward(&event) {
                         if let Err(error) = app.emit("bus-event", event) {
                             eprintln!("Could not deliver notification to UI: {error}");
@@ -153,18 +201,36 @@ pub fn event_from_raw(raw: &RawNotification) -> Option<Event> {
     Some(Event {
         id: uuid,
         source: "chat".into(),
+        agent: None,
+        session_id: None,
         kind: "message".into(),
         status: Some("unread".into()),
         title,
         body: raw.body.clone(),
         progress: None,
         started_at: raw.created_at.clone(),
+        cwd: None,
+        pid: None,
+        usage: None,
+        actions: None,
+        action_nonce: None,
         meta: Some(serde_json::json!({
             "app": raw.app_name,
             "sender": raw.title,
             "notificationId": raw.id.to_string(),
+            "createdAtTicks": raw.created_at_ticks,
         })),
     })
+}
+
+fn windows_now_ticks() -> i64 {
+    let unix_ticks = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .saturating_div(100)
+        .min(i64::MAX as u128) as i64;
+    WINDOWS_EPOCH_TICKS.saturating_add(unix_ticks)
 }
 
 pub fn check_permission() -> bool {
@@ -242,6 +308,7 @@ mod tests {
             title: "Alice".into(),
             body: Some("Hey there".into()),
             created_at: None,
+            created_at_ticks: Some(638_956_800_000_000_000),
         };
 
         let event = event_from_raw(&raw).expect("valid event");
@@ -254,6 +321,27 @@ mod tests {
         let meta = event.meta.unwrap();
         assert_eq!(meta.get("app").unwrap().as_str().unwrap(), "WhatsApp");
         assert_eq!(meta.get("sender").unwrap().as_str().unwrap(), "Alice");
+        assert_eq!(
+            meta.get("createdAtTicks").unwrap().as_i64(),
+            Some(638_956_800_000_000_000)
+        );
+    }
+
+    #[test]
+    fn baseline_ignores_existing_items_but_allows_new_items_after_resume() {
+        let mut baseline = NotificationBaseline::default();
+        assert!(!baseline.ignores(1, Some(100)));
+
+        baseline.reset(200, HashSet::from([1]));
+        assert!(baseline.ignores(2, Some(199)));
+        assert!(baseline.ignores(1, None));
+        assert!(!baseline.ignores(2, None));
+        assert!(!baseline.ignores(2, Some(200)));
+
+        baseline.reset(300, HashSet::from([2]));
+        assert!(baseline.ignores(2, None));
+        assert!(baseline.ignores(3, Some(299)));
+        assert!(!baseline.ignores(3, Some(301)));
     }
 
     #[test]
@@ -264,6 +352,7 @@ mod tests {
             title: "Test".into(),
             body: None,
             created_at: None,
+            created_at_ticks: None,
         };
         assert!(event_from_raw(&raw).is_none());
     }

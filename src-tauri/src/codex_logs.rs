@@ -12,7 +12,7 @@ use tauri::{AppHandle, Emitter};
 use crate::bus::Event;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
-const DISCOVERY_AGE: Duration = Duration::from_secs(10 * 60);
+const DISCOVERY_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const ACTIVE_AGE: Duration = Duration::from_secs(3 * 60);
 const INITIAL_TAIL_BYTES: u64 = 64 * 1024;
 
@@ -96,11 +96,15 @@ fn watch_sessions(app: AppHandle) {
             let updates = read_updates(&path, initial_offset, length);
             if let Some(latest) = updates.last() {
                 if latest.state == TaskState::Running
-                    && metadata
-                        .modified()
-                        .ok()
-                        .and_then(|time| SystemTime::now().duration_since(time).ok())
-                        .is_some_and(|age| age <= ACTIVE_AGE)
+                    && (latest
+                        .started_at
+                        .as_deref()
+                        .is_some_and(|timestamp| timestamp_is_recent(timestamp, ACTIVE_AGE))
+                        || metadata
+                            .modified()
+                            .ok()
+                            .and_then(|time| SystemTime::now().duration_since(time).ok())
+                            .is_some_and(|age| age <= ACTIVE_AGE))
                 {
                     emit_task(
                         &app,
@@ -117,6 +121,94 @@ fn watch_sessions(app: AppHandle) {
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn timestamp_is_recent(timestamp: &str, max_age: Duration) -> bool {
+    let Some((date, time_and_zone)) = timestamp.split_once('T') else {
+        return false;
+    };
+    let mut date_parts = date.split('-');
+    let (Some(Ok(year)), Some(Ok(month)), Some(Ok(day)), None) = (
+        date_parts.next().map(str::parse::<i64>),
+        date_parts.next().map(str::parse::<i64>),
+        date_parts.next().map(str::parse::<i64>),
+        date_parts.next(),
+    ) else {
+        return false;
+    };
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return false;
+    }
+
+    let zone_start = time_and_zone
+        .find(['Z', '+', '-'])
+        .unwrap_or(time_and_zone.len());
+    let time = &time_and_zone[..zone_start];
+    let mut time_parts = time.split(':');
+    let (Some(Ok(hour)), Some(Ok(minute)), Some(second_text), None) = (
+        time_parts.next().map(str::parse::<i64>),
+        time_parts.next().map(str::parse::<i64>),
+        time_parts.next(),
+        time_parts.next(),
+    ) else {
+        return false;
+    };
+    let second = second_text
+        .split('.')
+        .next()
+        .and_then(|part| part.parse::<i64>().ok());
+    let (Some(second), true) = (
+        second,
+        (0..=23).contains(&hour) && (0..=59).contains(&minute),
+    ) else {
+        return false;
+    };
+    if !(0..=60).contains(&second) {
+        return false;
+    }
+
+    let zone = &time_and_zone[zone_start..];
+    let offset_seconds = if zone.is_empty() || zone == "Z" {
+        0
+    } else {
+        let sign = match zone.as_bytes().first() {
+            Some(b'+') => 1,
+            Some(b'-') => -1,
+            _ => return false,
+        };
+        let mut offset_parts = zone[1..].split(':');
+        let (Some(Ok(offset_hour)), Some(Ok(offset_minute)), None) = (
+            offset_parts.next().map(str::parse::<i64>),
+            offset_parts.next().map(str::parse::<i64>),
+            offset_parts.next(),
+        ) else {
+            return false;
+        };
+        if !(0..=23).contains(&offset_hour) || !(0..=59).contains(&offset_minute) {
+            return false;
+        }
+        sign * (offset_hour * 3600 + offset_minute * 60)
+    };
+
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year - era * 400;
+    let adjusted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * adjusted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days_since_epoch = era * 146_097 + day_of_era - 719_468;
+    let unix_seconds =
+        days_since_epoch * 86_400 + hour * 3600 + minute * 60 + second - offset_seconds;
+    let Ok(unix_seconds) = u64::try_from(unix_seconds) else {
+        return false;
+    };
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()
+        .is_some_and(|now| {
+            now.as_secs().saturating_sub(unix_seconds) <= max_age.as_secs()
+                && unix_seconds <= now.as_secs()
+        })
 }
 
 fn sessions_directory() -> Option<PathBuf> {
@@ -229,13 +321,20 @@ fn emit_task(app: &AppHandle, thread_id: &str, update: LogUpdate) {
     };
     let event = Event {
         id: thread_id.to_owned(),
-        source: "codex".into(),
+        source: "ai".into(),
+        agent: Some("codex".into()),
+        session_id: Some(thread_id.to_owned()),
         kind: "task".into(),
         status: Some(status.into()),
         title: update.title.into(),
         body: None,
         progress: None,
         started_at: update.started_at,
+        cwd: None,
+        pid: None,
+        usage: None,
+        actions: None,
+        action_nonce: None,
         meta: None,
     };
     if let Err(error) = app.emit("bus-event", event) {

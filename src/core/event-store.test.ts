@@ -3,14 +3,39 @@ import { EventStore, type AppEvent } from "./event-store";
 
 const event = (id: string, status: AppEvent["status"], title = id): AppEvent => ({
   id,
-  source: "codex",
+  source: "ai",
+  agent: "codex",
+  sessionId: id,
   kind: "task",
   status,
   title,
 });
 
 describe("event store", () => {
-  it("upserts by id and prioritizes errors and needs-input peeks", () => {
+  it("falls back to id when an AI snapshot has no session identity", () => {
+    const store = new EventStore();
+    store.upsert({ id: "fallback-id", source: "ai", kind: "task", status: "running", title: "Old" });
+    store.upsert({ id: "fallback-id", source: "ai", kind: "task", status: "done", title: "Updated" });
+
+    expect(store.all()).toHaveLength(1);
+    expect(store.all()[0]?.title).toBe("Updated");
+  });
+
+  it("upserts AI task snapshots by agent and session", () => {
+    const store = new EventStore();
+    store.upsert({ ...event("first-id", "running", "Old snapshot"), sessionId: "same-session" });
+    store.upsert({ ...event("second-id", "needs_input", "Latest snapshot"), sessionId: "same-session" });
+    store.upsert({ ...event("other-agent", "running"), agent: "antigravity-cli", sessionId: "same-session" });
+
+    expect(store.all()).toHaveLength(2);
+    expect(store.all().find(({ agent }) => agent === "codex")).toMatchObject({
+      id: "second-id",
+      title: "Latest snapshot",
+    });
+    expect(store.nextPeek()?.id).toBe("second-id");
+  });
+
+  it("updates a session snapshot and prioritizes errors and needs-input peeks", () => {
     const store = new EventStore();
     store.upsert(event("task-1", "running", "old title"));
     store.upsert(event("task-1", "done", "updated title"));

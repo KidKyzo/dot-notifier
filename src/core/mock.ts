@@ -9,6 +9,9 @@ export type DemoTask = {
   detail?: string;
   progress: number;
   startedAt?: number;
+  pid?: number;
+  cwd?: string;
+  usage?: { tokens?: number; quotaLeft?: number };
 };
 
 export type DemoMessage = {

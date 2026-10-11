@@ -4,11 +4,21 @@
 - [ ] Verify hovering the dots still expands the overlay after click-through is enabled.
 - [ ] Verify the overlay stays within the primary monitor work area above the taskbar.
 - [ ] Verify the tray menu can pause notifications, enable quiet mode, open the overlay, and quit.
+- [ ] Verify launch shows no taskbar button or Alt+Tab entry; verify `--hidden` starts without showing the overlay.
+- [ ] Verify a second launch opens Settings in the running instance.
+- [ ] Verify the tray icon and aggregate tooltip on Windows 10 and 11, including light and dark taskbars at 100%, 150%, and 200% DPI.
+- [ ] Verify the tray menu opens Settings and the app config folder, and toggles overlay visibility.
 - [ ] Verify each corner choice stays inside the selected monitor's work area above the taskbar.
 - [ ] Verify changing the selected display moves the overlay to that monitor and survives app restart.
 - [ ] Verify peek duration and monitored-app filters persist after app restart.
 - [ ] Verify auto-start adds and removes the current-user Windows login entry.
 - [ ] Verify peeks are suppressed in fullscreen and Windows presentation states, then resume afterward.
+- [ ] Verify the opt-in fullscreen setting allows notification peeks in a borderless fullscreen game while Focus Session still suppresses them.
 - [ ] Verify Windows 11 Focus Session suppresses peeks, then restores them when ended.
 - [ ] Verify Windows 10 Focus Assist suppression (not currently exposed by the implemented documented APIs).
+- [ ] Verify clicking a Codex task row restores and focuses its top-level window, including when the row event comes from a short-lived PowerShell hook.
+- [ ] Verify token and quota values appear for task events that expose usage, and missing values stay hidden.
 - [ ] Verify incoming Windows toast notifications from monitored apps (e.g. WhatsApp, Telegram) appear in the Notifications dot.
+- [ ] Verify a trusted Codex `PermissionRequest` shows Approve, Reject, and Dismiss in the pill; only an explicit button click returns a decision, while timeout, dismissal, and hook exit fall through.
+- [ ] Enable Now Playing and verify title, artist, artwork, playback state, and controls for Spotify and Apple Music; then opt into browser media and verify a YouTube Music tab in Chrome/Edge. Confirm browser media is excluded when the opt-in is off.
+- [ ] Enable WhatsApp style cards and verify sender initials, single-line message preview, incoming call detection, and the Open WhatsApp action with real Windows notifications.

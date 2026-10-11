@@ -38,13 +38,7 @@ pub struct NotificationFilter {
 
 struct SeenNotification {
     seen_at: Instant,
-    content: NotificationContent,
-}
-
-#[derive(PartialEq, Eq)]
-struct NotificationContent {
-    title: String,
-    body: Option<String>,
+    content_hash: u64,
 }
 
 impl NotificationFilter {
@@ -151,18 +145,22 @@ impl NotificationFilter {
         };
 
         let normalized_app = app.to_lowercase();
-        let key = format!("{}:{normalized_app}{notification_id}", normalized_app.len());
-        let content = NotificationContent {
-            title: event.title.clone(),
-            body: event.body.clone(),
-        };
+        let created_at = metadata
+            .and_then(|meta| meta.get("createdAtTicks"))
+            .and_then(serde_json::Value::as_i64);
+        let key = format!(
+            "{}:{normalized_app}:{notification_id}:{}",
+            normalized_app.len(),
+            created_at.map_or_else(|| "unknown".to_owned(), |value| value.to_string())
+        );
+        let content_hash = notification_content_hash(&event.title, event.body.as_deref());
         let now = Instant::now();
         self.seen_notifications
             .retain(|_, seen| now.duration_since(seen.seen_at) < DEDUP_RETENTION);
         if self
             .seen_notifications
             .get(&key)
-            .is_some_and(|seen| seen.content == content)
+            .is_some_and(|seen| seen.content_hash == content_hash)
         {
             return false;
         }
@@ -181,11 +179,23 @@ impl NotificationFilter {
             key,
             SeenNotification {
                 seen_at: now,
-                content,
+                content_hash,
             },
         );
         true
     }
+}
+
+fn notification_content_hash(title: &str, body: Option<&str>) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in title
+        .bytes()
+        .chain([0])
+        .chain(body.unwrap_or_default().bytes())
+    {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn notification_id_string(value: &serde_json::Value) -> Option<String> {
@@ -217,6 +227,8 @@ mod tests {
         Event {
             id: "550e8400-e29b-41d4-a716-446655440000".into(),
             source: source.into(),
+            agent: None,
+            session_id: None,
             kind: if source == "chat" { "message" } else { "task" }.into(),
             status: Some(
                 if source == "chat" {
@@ -230,6 +242,11 @@ mod tests {
             body: Some("Sensitive message body".into()),
             progress: None,
             started_at: None,
+            cwd: None,
+            pid: None,
+            usage: None,
+            actions: None,
+            action_nonce: None,
             meta: Some(meta.into()),
         }
     }
@@ -289,6 +306,31 @@ mod tests {
         updated.body = Some("A newer WhatsApp message".into());
 
         assert!(filter.should_forward(&original));
+        assert!(filter.should_forward(&updated));
+        assert!(!filter.should_forward(&updated));
+    }
+
+    #[test]
+    fn identical_messages_with_reused_id_and_different_creation_times_are_forwarded() {
+        let mut filter = NotificationFilter::from_config(FilterConfig::default());
+        let mut first = event("chat", Some("WhatsApp"), Some("42"));
+        first.meta.as_mut().unwrap()["createdAtTicks"] = json!(100_i64);
+        let mut second = event("chat", Some("WhatsApp"), Some("42"));
+        second.meta.as_mut().unwrap()["createdAtTicks"] = json!(200_i64);
+
+        assert!(filter.should_forward(&first));
+        assert!(filter.should_forward(&second));
+    }
+
+    #[test]
+    fn changed_content_with_same_id_and_creation_time_is_forwarded_once() {
+        let mut filter = NotificationFilter::from_config(FilterConfig::default());
+        let mut first = event("chat", Some("WhatsApp"), Some("42"));
+        first.meta.as_mut().unwrap()["createdAtTicks"] = json!(100_i64);
+        let mut updated = first.clone();
+        updated.body = Some("Updated message".into());
+
+        assert!(filter.should_forward(&first));
         assert!(filter.should_forward(&updated));
         assert!(!filter.should_forward(&updated));
     }

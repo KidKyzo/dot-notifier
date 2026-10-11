@@ -1,10 +1,10 @@
 # Dot Notifier
 
-[![Windows](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://www.microsoft.com/windows)
+[![Windows](<https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows>)](https://www.microsoft.com/windows)
 [![Tauri 2](https://img.shields.io/badge/Tauri-v2-FFC131?logo=tauri&logoColor=black)](https://tauri.app/)
 [![React](https://img.shields.io/badge/React-v19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Release](https://img.shields.io/badge/Release-v0.1.0-brightgreen.svg)](https://github.com/KidKyzo/dot-notifier/releases)
+[![Release](https://img.shields.io/badge/Release-v0.2.0-brightgreen.svg)](https://github.com/KidKyzo/dot-notifier/releases)
 
 A lightweight, non-intrusive Windows desktop overlay designed for multi-tasking developers. Dot Notifier places ambient, minimal indicators in your screen corner to track **AI Agent progress**, **Windows notifications**, and **system performance**—expanding into informative pills and panels only when you need them.
 
@@ -22,12 +22,12 @@ Dot Notifier solves this with an ambient **three-dot micro-UI** positioned seaml
 
 ### Overlay States
 
-| State | Visual Behavior | Trigger |
-|---|---|---|
-| **Idle** | Low-opacity, minimal dots sitting cleanly in the screen corner. | Default quiescent state |
-| **Alert** | Dot pulses or transitions color (e.g., blue running, green complete, orange waiting for input, red error). | New event or state change |
-| **Peek** | Morphing pill (icon + single concise line) that appears and auto-dismisses after 3–4 seconds. | Incoming message, task finished, or metric threshold crossed |
-| **Expanded** | Interactive flyout panel with detailed task queues, notification list, and resource sparklines. | Hover or click |
+| State              | Visual Behavior                                                                                            | Trigger                                                      |
+| ------------------ | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| **Idle**     | Low-opacity, minimal dots sitting cleanly in the screen corner.                                            | Default quiescent state                                      |
+| **Alert**    | Dot pulses or transitions color (e.g., blue running, green complete, orange waiting for input, red error). | New event or state change                                    |
+| **Peek**     | Morphing pill (icon + single concise line) that appears and auto-dismisses after 3–4 seconds.             | Incoming message, task finished, or metric threshold crossed |
+| **Expanded** | Interactive flyout panel with detailed task queues, notification list, and resource sparklines.            | Hover or click                                               |
 
 ---
 

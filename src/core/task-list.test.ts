@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DemoTask } from "./mock";
-import { primaryCodexTask, primaryCodexTaskRows, upsertTask } from "./task-list";
+import { primaryCodexTask, primaryCodexTaskRows, upsertTask, validTaskUsage } from "./task-list";
 
 const task = (id: string, status: DemoTask["status"], startedAt?: number): DemoTask => ({
   id,
@@ -43,5 +43,30 @@ describe("Codex task list", () => {
     ];
 
     expect(primaryCodexTaskRows(tasks).map(({ id }) => id)).toEqual(["newest-completion"]);
+  });
+
+  it("keeps focus and usage metadata when a later lifecycle event omits it", () => {
+    const initial = {
+      ...task("thread", "running", 100),
+      pid: 4321,
+      usage: { tokens: 18200, quotaLeft: 0.63 },
+    };
+    const updated = upsertTask([initial], task("thread", "done"), 200)[0];
+
+    expect(updated.pid).toBe(4321);
+    expect(updated.usage).toEqual({ tokens: 18200, quotaLeft: 0.63 });
+  });
+});
+
+describe("task usage validation", () => {
+  it("keeps valid values and omits missing fields", () => {
+    expect(validTaskUsage({ tokens: 18200, quotaLeft: 0.63 })).toEqual({ tokens: 18200, quotaLeft: 0.63 });
+    expect(validTaskUsage({ tokens: 1200 })).toEqual({ tokens: 1200 });
+    expect(validTaskUsage(undefined)).toBeUndefined();
+  });
+
+  it("ignores invalid usage values", () => {
+    expect(validTaskUsage({ tokens: -1, quotaLeft: 2 })).toBeUndefined();
+    expect(validTaskUsage({ tokens: Number.NaN, quotaLeft: Number.POSITIVE_INFINITY })).toBeUndefined();
   });
 });

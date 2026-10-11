@@ -4,6 +4,12 @@ export type UserSettings = {
   autoStart: boolean;
   corner: "top-left" | "top-right" | "bottom-left" | "bottom-right";
   monitorKey: string | null;
+  nowPlayingEnabled: boolean;
+  nowPlayingPeekEnabled: boolean;
+  nowPlayingBrowserMediaEnabled: boolean;
+  whatsappCardEnabled: boolean;
+  whatsappNotificationsEnabled: boolean;
+  allowDuringFullscreen: boolean;
 };
 
 export const defaultSettings: UserSettings = {
@@ -12,6 +18,12 @@ export const defaultSettings: UserSettings = {
   autoStart: false,
   corner: "top-right",
   monitorKey: null,
+  nowPlayingEnabled: false,
+  nowPlayingPeekEnabled: false,
+  nowPlayingBrowserMediaEnabled: false,
+  whatsappCardEnabled: false,
+  whatsappNotificationsEnabled: true,
+  allowDuringFullscreen: false,
 };
 
 export const parseMonitoredApps = (value: string): string[] => Array.from(
@@ -40,6 +52,18 @@ export const loadSettings = (storage: Pick<Storage, "getItem">): UserSettings =>
         ? record.corner
         : defaultSettings.corner,
       monitorKey: typeof record.monitorKey === "string" ? record.monitorKey : defaultSettings.monitorKey,
+      nowPlayingEnabled: typeof record.nowPlayingEnabled === "boolean" ? record.nowPlayingEnabled : false,
+      nowPlayingPeekEnabled: typeof record.nowPlayingPeekEnabled === "boolean" ? record.nowPlayingPeekEnabled : false,
+      nowPlayingBrowserMediaEnabled: typeof record.nowPlayingBrowserMediaEnabled === "boolean"
+        ? record.nowPlayingBrowserMediaEnabled
+        : false,
+      whatsappCardEnabled: typeof record.whatsappCardEnabled === "boolean" ? record.whatsappCardEnabled : false,
+      whatsappNotificationsEnabled: typeof record.whatsappNotificationsEnabled === "boolean"
+        ? record.whatsappNotificationsEnabled
+        : true,
+      allowDuringFullscreen: typeof record.allowDuringFullscreen === "boolean"
+        ? record.allowDuringFullscreen
+        : false,
     };
   } catch {
     return defaultSettings;

@@ -7,12 +7,16 @@ use std::thread;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{Emitter, Manager, PhysicalPosition, WebviewWindow};
 
+mod approvals;
 mod bus;
 mod codex_logs;
+mod focus;
+mod media_controls;
 mod notification_filter;
 mod system_monitor;
 mod win_notifications;
@@ -21,9 +25,12 @@ mod win_notifications;
 struct AppState {
     paused: AtomicBool,
     quiet_mode: AtomicBool,
+    allow_during_fullscreen: std::sync::Arc<AtomicBool>,
     focus_session_active: std::sync::Arc<AtomicBool>,
     system_panel_open: std::sync::Arc<AtomicBool>,
     hit_area: Mutex<Option<HitArea>>,
+    tray: Mutex<Option<TrayIcon>>,
+    approvals: std::sync::Arc<approvals::ApprovalRegistry>,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -86,6 +93,61 @@ fn update_hit_area(state: tauri::State<'_, AppState>, area: HitArea) {
 #[tauri::command]
 fn set_system_panel_open(state: tauri::State<'_, AppState>, open: bool) {
     state.system_panel_open.store(open, Ordering::Relaxed);
+}
+
+#[tauri::command]
+fn focus_process(pid: u32) -> Result<(), String> {
+    focus::focus_process(pid)
+}
+
+#[tauri::command]
+async fn get_now_playing(allow_browser_media: bool) -> Option<media_controls::NowPlaying> {
+    tauri::async_runtime::spawn_blocking(move || media_controls::current(allow_browser_media))
+        .await
+        .ok()
+        .flatten()
+}
+
+#[tauri::command]
+async fn control_now_playing(action: String, allow_browser_media: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        media_controls::control(&action, allow_browser_media)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn open_whatsapp() -> Result<(), String> {
+    Command::new("explorer.exe")
+        .arg("whatsapp://")
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn respond_permission(
+    state: tauri::State<'_, AppState>,
+    event_id: String,
+    action: String,
+    nonce: String,
+) -> Result<(), String> {
+    let decision = match action.as_str() {
+        "approve" => approvals::ApprovalDecision::Allow,
+        "reject" => approvals::ApprovalDecision::Deny,
+        _ => return Err("Unknown permission action".into()),
+    };
+    state.approvals.complete(&event_id, &nonce, decision)
+}
+
+#[tauri::command]
+fn dismiss_permission(
+    state: tauri::State<'_, AppState>,
+    event_id: String,
+    nonce: String,
+) -> Result<(), String> {
+    state.approvals.dismiss(&event_id, &nonce)
 }
 
 fn place_on_work_area(
@@ -184,7 +246,7 @@ fn set_auto_start(enabled: bool) -> Result<(), String> {
         let mut command = Command::new("reg.exe");
         if enabled {
             let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-            let value = format!("\"{}\"", executable.display());
+            let value = format!("\"{}\" --hidden", executable.display());
             command.args([
                 "add",
                 r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
@@ -220,6 +282,24 @@ fn set_auto_start(enabled: bool) -> Result<(), String> {
         let _ = enabled;
         Err("Auto-start is available on Windows only".into())
     }
+}
+
+#[tauri::command]
+fn update_tray_status(
+    state: tauri::State<'_, AppState>,
+    running: u32,
+    waiting: u32,
+) -> Result<(), String> {
+    let status = format!("{running} running, {waiting} waiting");
+    let tray = state
+        .tray
+        .lock()
+        .map_err(|_| "Tray state is unavailable".to_owned())?;
+    if let Some(tray) = tray.as_ref() {
+        tray.set_tooltip(Some(status))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -263,6 +343,7 @@ fn request_notification_permission() -> Result<bool, String> {
 fn start_quiet_environment_poll(
     app: tauri::AppHandle,
     focus_session_active: std::sync::Arc<AtomicBool>,
+    allow_during_fullscreen: std::sync::Arc<AtomicBool>,
 ) {
     #[cfg(windows)]
     {
@@ -272,7 +353,9 @@ fn start_quiet_environment_poll(
             loop {
                 let focus_active = focus_session_supported && windows_focus_session_active();
                 focus_session_active.store(focus_active, Ordering::Relaxed);
-                let quiet = windows_quiet_environment() || focus_active;
+                let quiet =
+                    windows_quiet_environment(allow_during_fullscreen.load(Ordering::Relaxed))
+                        || focus_active;
                 if previous != Some(quiet) {
                     let _ = app.emit("quiet-environment", quiet);
                     previous = Some(quiet);
@@ -283,7 +366,7 @@ fn start_quiet_environment_poll(
     }
     #[cfg(not(windows))]
     {
-        let _ = (app, focus_session_active);
+        let _ = (app, focus_session_active, allow_during_fullscreen);
     }
 }
 
@@ -306,20 +389,21 @@ fn windows_focus_session_active() -> bool {
 }
 
 #[tauri::command]
-fn is_quiet_environment(state: tauri::State<'_, AppState>) -> bool {
+fn is_quiet_environment(allow_during_fullscreen: bool, state: tauri::State<'_, AppState>) -> bool {
     #[cfg(windows)]
     {
-        windows_quiet_environment() || state.focus_session_active.load(Ordering::Relaxed)
+        windows_quiet_environment(allow_during_fullscreen)
+            || state.focus_session_active.load(Ordering::Relaxed)
     }
     #[cfg(not(windows))]
     {
-        let _ = state;
+        let _ = (allow_during_fullscreen, state);
         false
     }
 }
 
 #[cfg(windows)]
-fn windows_quiet_environment() -> bool {
+fn windows_quiet_environment(allow_during_fullscreen: bool) -> bool {
     #[link(name = "shell32")]
     unsafe extern "system" {
         fn SHQueryUserNotificationState(state: *mut u32) -> i32;
@@ -327,7 +411,15 @@ fn windows_quiet_environment() -> bool {
     let mut state = 0;
     // HRESULT is zero on success; unsupported states fail open so the overlay remains useful.
     let succeeded = unsafe { SHQueryUserNotificationState(&mut state) } >= 0;
-    succeeded && matches!(state, 1 | 2 | 3 | 4 | 6)
+    succeeded
+        && (matches!(state, 1 | 4 | 6) || (!allow_during_fullscreen && matches!(state, 2 | 3)))
+}
+
+#[tauri::command]
+fn set_allow_during_fullscreen(enabled: bool, state: tauri::State<'_, AppState>) {
+    state
+        .allow_during_fullscreen
+        .store(enabled, Ordering::Relaxed);
 }
 
 fn start_cursor_poll(window: WebviewWindow) {
@@ -383,6 +475,159 @@ fn global_cursor_position() -> Option<(f64, f64)> {
     None
 }
 
+fn tray_image_for(theme: tauri::Theme, scale_factor: f64) -> Option<Image<'static>> {
+    let size = tray_icon_size(scale_factor);
+    let pixels: &[u8] = match (theme, size) {
+        (tauri::Theme::Light, 16) => include_bytes!("../icons/tray-light/16x16.rgba"),
+        (tauri::Theme::Light, 20) => include_bytes!("../icons/tray-light/20x20.rgba"),
+        (tauri::Theme::Light, 24) => include_bytes!("../icons/tray-light/24x24.rgba"),
+        (tauri::Theme::Light, _) => include_bytes!("../icons/tray-light/32x32.rgba"),
+        (tauri::Theme::Dark, 16) => include_bytes!("../icons/tray-dark/16x16.rgba"),
+        (tauri::Theme::Dark, 20) => include_bytes!("../icons/tray-dark/20x20.rgba"),
+        (tauri::Theme::Dark, 24) => include_bytes!("../icons/tray-dark/24x24.rgba"),
+        (tauri::Theme::Dark, _) => include_bytes!("../icons/tray-dark/32x32.rgba"),
+        (_, 16) => include_bytes!("../icons/tray-dark/16x16.rgba"),
+        (_, 20) => include_bytes!("../icons/tray-dark/20x20.rgba"),
+        (_, 24) => include_bytes!("../icons/tray-dark/24x24.rgba"),
+        _ => include_bytes!("../icons/tray-dark/32x32.rgba"),
+    };
+    Some(Image::new(pixels, size, size))
+}
+
+fn tray_icon_size(scale_factor: f64) -> u32 {
+    let desired = (16.0 * scale_factor).round() as u32;
+    [16u32, 20, 24, 32]
+        .into_iter()
+        .min_by_key(|size| (*size).abs_diff(desired))
+        .unwrap_or(16)
+}
+
+fn refresh_tray_icon(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let theme = window.theme().unwrap_or(tauri::Theme::Dark);
+    let scale_factor = window.scale_factor().unwrap_or(1.0);
+    let state = app.state::<AppState>();
+    let Ok(tray) = state.tray.lock() else {
+        return;
+    };
+    if let Some(tray) = tray.as_ref() {
+        if let Some(icon) = tray_image_for(theme, scale_factor) {
+            if let Err(error) = tray.set_icon(Some(icon)) {
+                eprintln!("Could not update tray icon: {error}");
+            }
+        }
+    }
+}
+
+fn set_tool_window(window: &WebviewWindow) -> tauri::Result<()> {
+    #[cfg(windows)]
+    {
+        const GWL_EXSTYLE: i32 = -20;
+        const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
+        const WS_EX_APPWINDOW: isize = 0x0004_0000;
+
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn GetWindowLongPtrW(window: *mut std::ffi::c_void, index: i32) -> isize;
+            fn SetWindowLongPtrW(window: *mut std::ffi::c_void, index: i32, value: isize) -> isize;
+        }
+
+        let hwnd = window.hwnd()?;
+        let style = unsafe { GetWindowLongPtrW(hwnd.0, GWL_EXSTYLE) };
+        let style = (style | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW;
+        unsafe { SetWindowLongPtrW(hwnd.0, GWL_EXSTYLE, style) };
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn initialize_single_instance() -> Result<Option<usize>, String> {
+    use std::ptr::null_mut;
+
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+    const EVENT_MODIFY_STATE: u32 = 0x0002;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateEventW(
+            attributes: *mut std::ffi::c_void,
+            manual_reset: i32,
+            initial_state: i32,
+            name: *const u16,
+        ) -> *mut std::ffi::c_void;
+        fn CreateMutexW(
+            attributes: *mut std::ffi::c_void,
+            initial_owner: i32,
+            name: *const u16,
+        ) -> *mut std::ffi::c_void;
+        fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> *mut std::ffi::c_void;
+        fn SetEvent(event: *mut std::ffi::c_void) -> i32;
+        fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+        fn GetLastError() -> u32;
+    }
+
+    let event_name: Vec<u16> = "Local\\DotNotifier.Settings.v1\0".encode_utf16().collect();
+    let mutex_name: Vec<u16> = "Local\\DotNotifier.Instance.v1\0".encode_utf16().collect();
+    let event = unsafe { CreateEventW(null_mut(), 1, 0, event_name.as_ptr()) };
+    if event.is_null() {
+        return Err("Could not create the single-instance event".into());
+    }
+    let mutex = unsafe { CreateMutexW(null_mut(), 0, mutex_name.as_ptr()) };
+    if mutex.is_null() {
+        unsafe { CloseHandle(event) };
+        return Err("Could not create the single-instance mutex".into());
+    }
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        let existing_event = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, event_name.as_ptr()) };
+        if !existing_event.is_null() {
+            unsafe {
+                SetEvent(existing_event);
+                CloseHandle(existing_event);
+            }
+        }
+        unsafe {
+            CloseHandle(event);
+            CloseHandle(mutex);
+        }
+        return Ok(None);
+    }
+
+    // Raw handles have no Rust destructor; leaving them open keeps the names alive until exit.
+    let _mutex = mutex;
+    Ok(Some(event as usize))
+}
+
+#[cfg(not(windows))]
+fn initialize_single_instance() -> Result<Option<usize>, String> {
+    Ok(Some(0))
+}
+
+#[cfg(windows)]
+fn start_single_instance_listener(app: tauri::AppHandle, event: usize) {
+    thread::spawn(move || {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn WaitForSingleObject(handle: *mut std::ffi::c_void, milliseconds: u32) -> u32;
+            fn ResetEvent(event: *mut std::ffi::c_void) -> i32;
+        }
+
+        let event = event as *mut std::ffi::c_void;
+        loop {
+            if unsafe { WaitForSingleObject(event, u32::MAX) } == 0 {
+                unsafe { ResetEvent(event) };
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                }
+                let _ = app.emit("tray-controls", serde_json::json!({ "openSettings": true }));
+            } else {
+                break;
+            }
+        }
+    });
+}
+
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let pause = CheckMenuItem::with_id(
         app,
@@ -393,17 +638,64 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let quiet = CheckMenuItem::with_id(app, "quiet", "Quiet mode", true, false, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "Toggle overlay", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Open settings", true, None::<&str>)?;
+    let config = MenuItem::with_id(app, "config", "Open config folder", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&pause, &quiet, &separator, &settings, &quit])?;
+    let hint_path = app.path().app_local_data_dir()?.join("tray-pin-hint-seen");
+    let pin_hint = if hint_path.exists() {
+        None
+    } else {
+        Some(MenuItem::with_id(
+            app,
+            "pin_hint",
+            "Windows 11: drag this icon from ^ to the taskbar",
+            true,
+            None::<&str>,
+        )?)
+    };
+    let menu = Menu::new(app)?;
+    if let Some(pin_hint) = pin_hint.as_ref() {
+        menu.append(pin_hint)?;
+        menu.append(&separator)?;
+    }
+    menu.append_items(&[&show, &pause, &quiet])?;
+    menu.append(&separator)?;
+    menu.append_items(&[&settings, &config, &quit])?;
+    let event_menu = menu.clone();
+    let event_pin_hint = pin_hint.clone();
 
-    let icon = app.default_window_icon().cloned();
+    let icon = app
+        .get_webview_window("main")
+        .and_then(|window| tray_image_for(window.theme().ok()?, window.scale_factor().ok()?))
+        .or_else(|| app.default_window_icon().cloned());
     let mut tray = TrayIconBuilder::new()
         .menu(&menu)
         .on_menu_event(move |app, event| {
             let state = app.state::<AppState>();
             match event.id().as_ref() {
+                "pin_hint" => {
+                    if let Some(parent) = hint_path.parent() {
+                        if std::fs::create_dir_all(parent).is_ok()
+                            && std::fs::write(&hint_path, b"seen").is_ok()
+                        {
+                            if let Some(item) = event_pin_hint.as_ref() {
+                                let _ = event_menu.remove(item);
+                            }
+                        }
+                    }
+                }
+                "show" => {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let is_visible = window.is_visible().unwrap_or(false);
+                        if is_visible {
+                            let _ = window.hide();
+                        } else {
+                            let _ = window.show();
+                        }
+                    }
+                }
                 "pause" => {
                     let paused = !state.paused.load(Ordering::Relaxed);
                     state.paused.store(paused, Ordering::Relaxed);
@@ -426,6 +718,13 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     }
                     let _ = app.emit("tray-controls", serde_json::json!({ "openSettings": true }));
                 }
+                "config" => {
+                    if let Ok(directory) = app.path().app_config_dir() {
+                        if std::fs::create_dir_all(&directory).is_ok() {
+                            let _ = Command::new("explorer.exe").arg(directory).spawn();
+                        }
+                    }
+                }
                 "quit" => app.exit(0),
                 _ => {}
             }
@@ -433,30 +732,65 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     if let Some(icon) = icon {
         tray = tray.icon(icon);
     }
-    let _tray = tray.build(app)?;
+    let tray = tray.tooltip("0 running, 0 waiting").build(app)?;
+    if let Ok(mut stored) = app.state::<AppState>().tray.lock() {
+        *stored = Some(tray);
+    }
     Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let instance_event = match initialize_single_instance() {
+        Ok(Some(event)) => event,
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!("Could not initialize single-instance mode: {error}");
+            return;
+        }
+    };
+    let hidden_start = std::env::args_os().any(|argument| argument == "--hidden");
     tauri::Builder::default()
         .manage(AppState::default())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             update_hit_area,
             set_system_panel_open,
+            focus_process,
+            get_now_playing,
+            control_now_playing,
+            open_whatsapp,
+            respond_permission,
+            dismiss_permission,
             list_monitors,
             set_placement,
             set_auto_start,
             set_monitored_apps,
             is_quiet_environment,
+            set_allow_during_fullscreen,
             check_notification_permission,
-            request_notification_permission
+            request_notification_permission,
+            update_tray_status
         ])
-        .setup(|app| {
+        .setup(move |app| {
+            #[cfg(windows)]
+            start_single_instance_listener(app.handle().clone(), instance_event);
+            #[cfg(not(windows))]
+            let _ = instance_event;
+
+            #[cfg(windows)]
+            {
+                #[link(name = "shell32")]
+                unsafe extern "system" {
+                    fn SetCurrentProcessExplicitAppUserModelID(app_id: *const u16) -> i32;
+                }
+                let app_id: Vec<u16> = "com.dotnotifier.app\0".encode_utf16().collect();
+                unsafe { SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr()) };
+            }
             start_quiet_environment_poll(
                 app.handle().clone(),
                 app.state::<AppState>().focus_session_active.clone(),
+                app.state::<AppState>().allow_during_fullscreen.clone(),
             );
             system_monitor::start(
                 app.handle().clone(),
@@ -466,20 +800,40 @@ pub fn run() {
             win_notifications::start(app.handle().clone());
             match app.path().app_local_data_dir() {
                 Ok(directory) => {
-                    if let Err(error) = bus::start(app.handle().clone(), &directory) {
+                    if let Err(error) = bus::start(
+                        app.handle().clone(),
+                        &directory,
+                        app.state::<AppState>().approvals.clone(),
+                    ) {
                         eprintln!("Could not start local event bus: {error}");
                     }
                 }
                 Err(error) => eprintln!("Could not resolve event bus session directory: {error}"),
             }
             if let Some(window) = app.get_webview_window("main") {
+                if let Err(error) = set_tool_window(&window) {
+                    eprintln!("Could not mark overlay as a tool window: {error}");
+                }
                 if let Err(error) = place_on_work_area(&window, &Corner::TopRight, None) {
                     eprintln!("Could not place overlay in the work area: {error}");
                 }
                 if let Err(error) = window.set_ignore_cursor_events(true) {
                     eprintln!("Could not enable overlay click-through: {error}");
                 }
-                start_cursor_poll(window);
+                let app_handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if matches!(
+                        event,
+                        tauri::WindowEvent::ScaleFactorChanged { .. }
+                            | tauri::WindowEvent::ThemeChanged(_)
+                    ) {
+                        refresh_tray_icon(&app_handle);
+                    }
+                });
+                start_cursor_poll(window.clone());
+                if !hidden_start {
+                    let _ = window.show();
+                }
             }
             setup_tray(app.handle())?;
             Ok(())
@@ -490,7 +844,15 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{position_for, Corner, HitArea};
+    use super::{position_for, tray_icon_size, Corner, HitArea};
+
+    #[test]
+    fn tray_icon_size_tracks_common_windows_dpi_scales() {
+        assert_eq!(tray_icon_size(1.0), 16);
+        assert_eq!(tray_icon_size(1.25), 20);
+        assert_eq!(tray_icon_size(1.5), 24);
+        assert_eq!(tray_icon_size(2.0), 32);
+    }
 
     #[test]
     fn hit_area_includes_top_left_and_excludes_bottom_right() {

@@ -5,11 +5,12 @@ import { listen } from "@tauri-apps/api/event";
 import { islandReducer } from "./core/island-state";
 import { CHAT_RETENTION_MS, EventStore, type AppEvent } from "./core/event-store";
 import { pruneExpiredMessages, upsertChatMessage } from "./core/chat-retention";
-import { primaryCodexTaskRows, upsertTask } from "./core/task-list";
+import { primaryCodexTaskRows, upsertTask, validTaskUsage } from "./core/task-list";
 import { initialSystemMetrics, mockSystemAlert, parseSystemMetrics } from "./core/system-metrics";
 import { systemCopy } from "./core/system-copy";
 import { settingsCopy } from "./core/settings-copy";
 import { defaultSettings, loadSettings, parseMonitoredApps, type UserSettings } from "./core/settings";
+import { isIncomingWhatsAppCall, isWhatsAppNotification } from "./core/whatsapp-calls";
 import {
   incomingMessages,
   emptyTasks,
@@ -23,8 +24,9 @@ import "./App.css";
 
 type PulseSource = "codex" | "chat" | "system";
 type DotStatus = DemoStatus | "warn" | "crit";
-type PeekInfo = { source: string; message: string; chatMessages: AppEvent[] };
+type PeekInfo = { source: string; message: string; chatMessages: AppEvent[]; actionEvent?: AppEvent; chatSender?: string; chatApp?: string; incomingCall?: boolean };
 type MonitorOption = { key: string; label: string; width: number; height: number };
+type NowPlayingSnapshot = { title: string; artist: string; playing: boolean; coverDataUrl: string | null };
 
 const colors: Record<DotStatus, string> = {
   idle: "#8e8e93",
@@ -45,6 +47,10 @@ const statusLabels: Record<DemoStatus, string> = {
 };
 
 const percent = (value: number | null) => value === null ? systemCopy.unavailable : `${Math.round(value)}%`;
+
+const initials = (name: string) => name.trim().split(/\s+/).slice(0, 2).map((part) => Array.from(part)[0] ?? "").join("").toUpperCase() || "?";
+
+const avatarHue = (name: string) => Array.from(name).reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) % 360, 0);
 
 const metricUsage = (used: number | null, total: number | null, value: number | null) => {
   if (value === null) return systemCopy.unavailable;
@@ -139,6 +145,8 @@ function App() {
   const [monitoredAppsText, setMonitoredAppsText] = useState(settings.monitoredApps.join(", "));
   const [notificationPermission, setNotificationPermission] = useState<boolean | null>(null);
   const [monitors, setMonitors] = useState<MonitorOption[]>([]);
+  const [nowPlaying, setNowPlaying] = useState<NowPlayingSnapshot | null>(null);
+  const [nowPlayingTitleOverflows, setNowPlayingTitleOverflows] = useState(false);
   const eventStore = useRef(new EventStore());
   const hoverExpanded = useRef(false);
   const clickPinned = useRef(false);
@@ -147,15 +155,25 @@ function App() {
   const quietModeRef = useRef(quietMode);
   const hudRef = useRef<HTMLElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const nowPlayingTitleRef = useRef<HTMLSpanElement>(null);
+  const nowPlayingPeekRef = useRef<HTMLSpanElement>(null);
+  const settingsRef = useRef(settings);
+
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
 
   const showEventPeek = (next: AppEvent) => {
     const chatSource = (typeof next.meta?.sender === "string" && next.meta.sender)
       || (typeof next.meta?.app === "string" && next.meta.app)
       || "Notification";
     const chatMessages = next.source === "chat" ? eventStore.current.pendingChatMessages(3) : [];
+    const sender = (typeof next.meta?.sender === "string" && next.meta.sender)
+      || (typeof next.meta?.app === "string" && next.meta.app)
+      || next.title;
+    const cardEnabled = settingsRef.current.whatsappCardEnabled;
+    const incomingCall = cardEnabled && isIncomingWhatsAppCall(next);
     setPeekInfo({
-      source: next.source === "codex"
-        ? "Codex"
+      source: next.source === "ai"
+        ? (next.agent === "codex" ? "Codex" : next.agent ?? "AI")
       : next.source === "system"
         ? systemCopy.system
         : chatSource,
@@ -163,16 +181,22 @@ function App() {
         ? next.status === "crit" ? systemCopy.criticalAlert : systemCopy.warningAlert
         : (next.body || next.title),
       chatMessages,
+      ...(typeof next.meta?.app === "string" ? { chatApp: next.meta.app } : {}),
+      ...(cardEnabled && next.source === "chat" ? { chatSender: sender } : {}),
+      ...(incomingCall ? { incomingCall: true } : {}),
+      ...(next.actions && next.actionNonce ? { actionEvent: next } : {}),
     });
-    setPulseSource(next.source === "codex" || next.source === "chat" || next.source === "system"
-      ? next.source
-      : null);
+    setPulseSource(next.source === "ai" ? "codex" : next.source);
     dispatch({ type: "set", state: "alert" });
   };
 
   const showNextQueuedPeek = () => {
     if (quietEnvironmentRef.current || pausedRef.current || quietModeRef.current) return;
-    const next = eventStore.current.nextPeek();
+    let next = eventStore.current.nextPeek();
+    while (next && !settingsRef.current.whatsappNotificationsEnabled && isWhatsAppNotification(next)) {
+      eventStore.current.dismissPeek();
+      next = eventStore.current.nextPeek();
+    }
     if (next) showEventPeek(next);
   };
 
@@ -182,6 +206,15 @@ function App() {
       .then((granted) => setNotificationPermission(granted))
       .catch((error: unknown) => console.warn("Could not check notification permission", error));
   }, []);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    const running = tasks.filter((task) => task.status === "running").length;
+    const waiting = tasks.filter((task) => task.status === "needs_input").length;
+    void invoke("update_tray_status", { running, waiting }).catch((error: unknown) => {
+      console.warn("Could not update tray status", error);
+    });
+  }, [tasks]);
 
   useEffect(() => {
     const oldestMessageExpiry = messages.reduce<number | undefined>((next, message) => {
@@ -212,6 +245,17 @@ function App() {
   useEffect(() => {
     quietEnvironmentRef.current = quietEnvironment;
   }, [quietEnvironment]);
+
+  useEffect(() => {
+    if (settings.whatsappNotificationsEnabled || !/whatsapp/i.test(peekInfo.chatApp ?? "")
+        || (state !== "alert" && state !== "peek")) return;
+    if (peekInfo.chatMessages.length > 0) {
+      eventStore.current.dismissPeekGroup(peekInfo.chatMessages.map((message) => message.id));
+    }
+    dispatch({ type: "dismiss" });
+    setPulseSource(null);
+    showNextQueuedPeek();
+  }, [settings.whatsappNotificationsEnabled, state, peekInfo]);
 
   useEffect(() => {
     pausedRef.current = paused;
@@ -251,6 +295,12 @@ function App() {
 
   useEffect(() => {
     if (!isTauri()) return;
+    void invoke("set_allow_during_fullscreen", { enabled: settings.allowDuringFullscreen })
+      .catch((error: unknown) => console.warn("Could not update fullscreen overlay setting", error));
+  }, [settings.allowDuringFullscreen]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
     const timer = window.setTimeout(() => {
       void invoke("set_monitored_apps", { apps: settings.monitoredApps })
         .catch((error: unknown) => console.warn("Could not update notification app filter", error));
@@ -260,7 +310,9 @@ function App() {
 
   useEffect(() => {
     if (!isTauri()) return;
-    void invoke<boolean>("is_quiet_environment")
+    void invoke<boolean>("is_quiet_environment", {
+      allowDuringFullscreen: settings.allowDuringFullscreen,
+    })
       .then((quiet) => {
         quietEnvironmentRef.current = quiet;
         setQuietEnvironment(quiet);
@@ -288,13 +340,56 @@ function App() {
       disposed = true;
       unlisten?.();
     };
-  }, [state]);
+  }, [state, settings.allowDuringFullscreen]);
 
   useEffect(() => {
     if (!isTauri()) return;
     void invoke("set_system_panel_open", { open: state === "expanded" })
       .catch((error: unknown) => console.warn("Could not update system monitor polling", error));
   }, [state]);
+
+  useEffect(() => {
+    const peekCanShow = settings.nowPlayingPeekEnabled && state !== "expanded";
+    if (!settings.nowPlayingEnabled || (state !== "expanded" && !peekCanShow) || settingsOpen) {
+      setNowPlaying(null);
+      return;
+    }
+    if (!isTauri()) {
+      setNowPlaying({ title: "Midnight City", artist: "M83", playing: true, coverDataUrl: null });
+      return;
+    }
+    let disposed = false;
+    let pending = false;
+    const refresh = () => {
+      if (pending) return;
+      pending = true;
+      void invoke<NowPlayingSnapshot | null>("get_now_playing", {
+        allowBrowserMedia: settings.nowPlayingBrowserMediaEnabled,
+      })
+        .then((snapshot) => { if (!disposed) setNowPlaying(snapshot); })
+        .catch((error: unknown) => console.warn("Could not read Windows media session", error))
+        .finally(() => { pending = false; });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 2500);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [settings.nowPlayingEnabled, settings.nowPlayingPeekEnabled, settings.nowPlayingBrowserMediaEnabled, settingsOpen, state]);
+
+  const controlNowPlaying = (action: "play" | "pause" | "next") => {
+    if (!isTauri()) {
+      setNowPlaying((current) => current ? { ...current, playing: action === "play" } : current);
+      return;
+    }
+    void invoke("control_now_playing", {
+      action,
+      allowBrowserMedia: settingsRef.current.nowPlayingBrowserMediaEnabled,
+    }).then(() => {
+      if (action !== "next") setNowPlaying((current) => current ? { ...current, playing: action === "play" } : current);
+    }).catch((error: unknown) => console.warn("Could not control Windows media session", error));
+  };
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -304,6 +399,7 @@ function App() {
       if (payload.paused !== undefined) setPaused(payload.paused);
       if (payload.quietMode !== undefined) setQuietMode(payload.quietMode);
       if (payload.openSettings) {
+        setSettingsOpen(true);
         clickPinned.current = false;
         hoverExpanded.current = false;
         dispatch({ type: "set", state: "expanded" });
@@ -323,14 +419,13 @@ function App() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen<AppEvent>("bus-event", ({ payload }) => {
-      if (payload.source === "antigravity") return;
       if (payload.source !== "chat" || payload.kind !== "message") eventStore.current.upsert(payload);
       if (payload.source === "system" && payload.kind === "metric") {
         const nextMetrics = parseSystemMetrics(payload.meta);
         if (nextMetrics) setSystemMetrics(nextMetrics);
         if (payload.status === undefined) return;
       }
-      if (payload.source === "codex"
+      if (payload.source === "ai" && payload.agent === "codex"
           && payload.kind === "task"
           && (payload.status === "running" || payload.status === "done"
             || payload.status === "error" || payload.status === "needs_input")) {
@@ -345,6 +440,9 @@ function App() {
           ...(payload.startedAt && Number.isFinite(Date.parse(payload.startedAt))
             ? { startedAt: Date.parse(payload.startedAt) }
             : {}),
+          ...(payload.pid !== undefined ? { pid: payload.pid } : {}),
+          ...(payload.cwd ? { cwd: payload.cwd } : {}),
+          ...(payload.usage ? { usage: payload.usage } : {}),
         };
         setTasks((current) => upsertTask(current, task));
       }
@@ -399,6 +497,8 @@ function App() {
       return () => window.clearTimeout(timer);
     }
 
+    if (state === "peek" && peekInfo.actionEvent) return;
+
     if (state === "peek") {
       const timer = window.setTimeout(() => {
         const groupedChatIds = peekInfo.chatMessages.length > 1
@@ -441,15 +541,31 @@ function App() {
       hud.style.width = "300px";
       hud.style.height = peekInfo.chatMessages.length > 1
         ? `${56 + peekInfo.chatMessages.length * 32}px`
-        : "44px";
+        : peekInfo.incomingCall ? "92px" : peekInfo.chatSender ? "76px" : peekInfo.actionEvent ? "72px" : "44px";
     } else if (state === "expanded" && panelRef.current) {
       hud.style.width = "320px";
       hud.style.height = `${panelRef.current.clientHeight}px`;
     } else {
-      hud.style.width = "64px";
+      const showNowPlaying = settings.nowPlayingEnabled && settings.nowPlayingPeekEnabled && nowPlaying?.playing;
+      const labelWidth = nowPlayingPeekRef.current?.getBoundingClientRect().width ?? 190;
+      const peekWidth = Math.min(276, Math.max(145, Math.ceil(labelWidth + 84)));
+      hud.style.width = showNowPlaying ? `${peekWidth}px` : "64px";
       hud.style.height = "24px";
     }
-  }, [state, tasks, messages, peekInfo, systemMetrics, settingsOpen]);
+  }, [state, tasks, messages, peekInfo, systemMetrics, settingsOpen, settings.nowPlayingEnabled, settings.nowPlayingPeekEnabled, nowPlaying]);
+
+  useLayoutEffect(() => {
+    const title = nowPlayingTitleRef.current;
+    if (!title) {
+      setNowPlayingTitleOverflows(false);
+      return;
+    }
+    const updateOverflow = () => setNowPlayingTitleOverflows(title.scrollWidth > title.clientWidth + 1);
+    updateOverflow();
+    const observer = new ResizeObserver(updateOverflow);
+    observer.observe(title);
+    return () => observer.disconnect();
+  }, [nowPlaying?.title, settings.nowPlayingEnabled, settings.nowPlayingPeekEnabled]);
 
   const codexRows = primaryCodexTaskRows(tasks);
   const codex = codexRows[0] ?? initialTasks[0];
@@ -517,6 +633,23 @@ function App() {
     showNextQueuedPeek();
   };
 
+  const receiveMockCall = () => {
+    const id = `mock-call-${Date.now()}`;
+    const event: AppEvent = {
+      id,
+      source: "chat",
+      kind: "message",
+      status: "unread",
+      title: "Rina",
+      body: "Incoming voice call",
+      meta: { app: "WhatsApp", sender: "Rina" },
+    };
+    eventStore.current.upsert(event);
+    setPeekInfo({ source: "WhatsApp", message: event.body ?? "", chatMessages: [], chatSender: "Rina", incomingCall: settings.whatsappCardEnabled });
+    setPulseSource("chat");
+    dispatch({ type: "set", state: "alert" });
+  };
+
   const showMockSystemAlert = () => {
     const current = mockSystemAlert(systemMetrics.current);
     const history = [...systemMetrics.history, current].slice(-60);
@@ -532,6 +665,25 @@ function App() {
     eventStore.current.upsert(event);
     setPeekInfo({ source: systemCopy.system, message: systemCopy.criticalAlert, chatMessages: [] });
     setPulseSource("system");
+    dispatch({ type: "set", state: "alert" });
+  };
+
+  const showMockPermissionRequest = () => {
+    const id = "550e8400-e29b-41d4-a716-446655440099";
+    const event: AppEvent = {
+      id,
+      source: "ai",
+      agent: "codex",
+      sessionId: id,
+      kind: "task",
+      status: "needs_input",
+      title: "Codex is waiting for permission",
+      actions: ["approve", "reject"],
+      actionNonce: "mock-nonce",
+    };
+    eventStore.current.upsert(event);
+    setPeekInfo({ source: "Codex", message: event.title, chatMessages: [], actionEvent: event });
+    setPulseSource("codex");
     dispatch({ type: "set", state: "alert" });
   };
 
@@ -583,12 +735,27 @@ function App() {
         ? task.title
         : `${task.title} · ${statusLabels[task.status]}`;
 
+    const validUsage = validTaskUsage(task.usage);
+    const usageLabel = validUsage
+      ? settingsCopy.taskUsage(validUsage.tokens, validUsage.quotaLeft)
+      : undefined;
+    const focusTask = () => {
+      if (!isTauri() || task.pid === undefined) return;
+      void invoke("focus_process", { pid: task.pid }).catch((error: unknown) => {
+        console.warn("Could not focus task window", error);
+      });
+    };
+
     return (
-      <div className="row" key={task.id}>
+      <button className="row task-row" disabled={task.pid === undefined || !isTauri()} key={task.id} onClick={(event) => {
+        event.stopPropagation();
+        focusTask();
+      }} type="button">
         <Dot status={task.status} />
         <div className="tx">
           <b>{task.name}</b>
           <span>{subtitle}</span>
+          {usageLabel && <span className="task-usage">{usageLabel}</span>}
           {task.detail && <span className="task-detail">{task.detail}</span>}
           {task.status === "running" && (
             <div className="bar" style={{ "--bar-color": colors.running } as CSSProperties}>
@@ -596,7 +763,7 @@ function App() {
             </div>
           )}
         </div>
-      </div>
+      </button>
     );
   };
 
@@ -631,13 +798,24 @@ function App() {
         role="button"
         tabIndex={0}
       >
-        <div className="layer dots">
+        <div className={`layer dots${settings.nowPlayingEnabled && settings.nowPlayingPeekEnabled && nowPlaying?.playing ? " dots-now-playing" : ""}`}>
+          {settings.nowPlayingEnabled && settings.nowPlayingPeekEnabled && nowPlaying?.playing && (
+            <span className="now-playing-peek" ref={nowPlayingPeekRef} title={`${settingsCopy.nowPlaying} — ${nowPlaying.title}`}>
+              <span className="now-playing-peek-prefix">{settingsCopy.nowPlaying} —</span>
+              <span aria-label={nowPlaying.title} className="now-playing-title-viewport" ref={nowPlayingTitleRef}>
+                <span className={`now-playing-title-track${nowPlayingTitleOverflows ? " is-scrolling" : ""}`}>
+                  <span>{nowPlaying.title}</span>
+                  {nowPlayingTitleOverflows && <span aria-hidden="true">{nowPlaying.title}</span>}
+                </span>
+              </span>
+            </span>
+          )}
           <Dot status={activeTask.status} progress={activeTask.progress} ring={activeTask.status === "running"} pulse={pulseSource === "codex"} />
           <Dot status={unreadCount > 0 ? "done" : "idle"} badge={unreadCount > 0} pulse={pulseSource === "chat"} />
           <Dot status={systemStatus} progress={systemLoad / 100} ring={systemLoad > 0} pulse={pulseSource === "system"} />
         </div>
 
-        <div className={`layer peek${peekInfo.chatMessages.length > 1 ? " peek-multi" : ""}`}>
+        <div className={`layer peek${peekInfo.chatMessages.length > 1 ? " peek-multi" : ""}${peekInfo.actionEvent ? " peek-approval" : ""}`}>
           {peekInfo.chatMessages.length > 1 ? (
             <>
               <div className="peek-group-heading">
@@ -658,10 +836,57 @@ function App() {
             </>
           ) : (
             <>
-              <Dot status={pulseSource === "system" ? systemStatus : pulseSource === "chat" ? "done" : codex.status} />
-              <b>{peekInfo.source}</b>
-              <span>{peekInfo.message}</span>
+              {peekInfo.chatSender ? (
+                <div className={`whatsapp-peek${peekInfo.incomingCall ? " whatsapp-call" : ""}`}>
+                  <div className="avatar whatsapp-avatar" style={{ "--avatar-hue": avatarHue(peekInfo.chatSender) } as CSSProperties}>{initials(peekInfo.chatSender)}</div>
+                  <div className="whatsapp-peek-copy"><b>{peekInfo.chatSender}</b><span>{peekInfo.incomingCall ? settingsCopy.incomingCall : peekInfo.message}</span></div>
+                  {peekInfo.incomingCall && <button className="open-whatsapp" onClick={(event) => {
+                    event.stopPropagation();
+                    if (isTauri()) void invoke("open_whatsapp").catch((error: unknown) => console.warn("Could not open WhatsApp", error));
+                  }} type="button">{settingsCopy.openWhatsApp}</button>}
+                </div>
+              ) : <><Dot status={pulseSource === "system" ? systemStatus : pulseSource === "chat" ? "done" : codex.status} /><b>{peekInfo.source}</b><span>{peekInfo.message}</span></>}
             </>
+          )}
+          {peekInfo.actionEvent?.actionNonce && (
+            <div className="approval-actions" onClick={(event) => event.stopPropagation()}>
+              {peekInfo.actionEvent.actions?.includes("approve") && (
+                <button type="button" onClick={() => {
+                  const request = peekInfo.actionEvent;
+                  if (!request?.actionNonce) return;
+                  setPeekInfo((current) => ({ ...current, actionEvent: undefined }));
+                  if (!isTauri()) return;
+                  void invoke("respond_permission", {
+                    eventId: request.id,
+                    action: "approve",
+                    nonce: request.actionNonce,
+                  }).catch((error: unknown) => console.warn("Could not approve Codex request", error));
+                }}>{settingsCopy.approvePermission}</button>
+              )}
+              {peekInfo.actionEvent.actions?.includes("reject") && (
+                <button type="button" onClick={() => {
+                  const request = peekInfo.actionEvent;
+                  if (!request?.actionNonce) return;
+                  setPeekInfo((current) => ({ ...current, actionEvent: undefined }));
+                  if (!isTauri()) return;
+                  void invoke("respond_permission", {
+                    eventId: request.id,
+                    action: "reject",
+                    nonce: request.actionNonce,
+                  }).catch((error: unknown) => console.warn("Could not reject Codex request", error));
+                }}>{settingsCopy.rejectPermission}</button>
+              )}
+              <button type="button" onClick={() => {
+                const request = peekInfo.actionEvent;
+                if (!request?.actionNonce) return;
+                setPeekInfo((current) => ({ ...current, actionEvent: undefined }));
+                if (!isTauri()) return;
+                void invoke("dismiss_permission", {
+                  eventId: request.id,
+                  nonce: request.actionNonce,
+                }).catch((error: unknown) => console.warn("Could not dismiss Codex request", error));
+              }}>{settingsCopy.dismissPermission}</button>
+            </div>
           )}
         </div>
 
@@ -734,6 +959,46 @@ function App() {
                 </div>
               )}
               <label className="setting-toggle">
+                <span>{settingsCopy.nowPlaying}</span>
+                <input type="checkbox" checked={settings.nowPlayingEnabled} onChange={(event) => {
+                  setSettings((current) => ({ ...current, nowPlayingEnabled: event.target.checked, nowPlayingPeekEnabled: event.target.checked ? current.nowPlayingPeekEnabled : false }));
+                }} />
+              </label>
+              {settings.nowPlayingEnabled && (
+                <label className="setting-toggle">
+                  <span>{settingsCopy.nowPlayingBrowserMedia}</span>
+                  <input type="checkbox" checked={settings.nowPlayingBrowserMediaEnabled} onChange={(event) => {
+                    setSettings((current) => ({ ...current, nowPlayingBrowserMediaEnabled: event.target.checked }));
+                  }} />
+                </label>
+              )}
+              {settings.nowPlayingEnabled && (
+                <label className="setting-toggle">
+                  <span>{settingsCopy.nowPlayingPeek}</span>
+                  <input type="checkbox" checked={settings.nowPlayingPeekEnabled} onChange={(event) => {
+                    setSettings((current) => ({ ...current, nowPlayingPeekEnabled: event.target.checked }));
+                  }} />
+                </label>
+              )}
+              <label className="setting-toggle">
+                <span>{settingsCopy.whatsappNotifications}</span>
+                <input type="checkbox" checked={settings.whatsappNotificationsEnabled} onChange={(event) => {
+                  setSettings((current) => ({ ...current, whatsappNotificationsEnabled: event.target.checked }));
+                }} />
+              </label>
+              <label className="setting-toggle">
+                <span>{settingsCopy.whatsappCard}</span>
+                <input type="checkbox" checked={settings.whatsappCardEnabled} onChange={(event) => {
+                  setSettings((current) => ({ ...current, whatsappCardEnabled: event.target.checked }));
+                }} />
+              </label>
+              <label className="setting-toggle">
+                <span>{settingsCopy.allowDuringFullscreen}</span>
+                <input type="checkbox" checked={settings.allowDuringFullscreen} onChange={(event) => {
+                  setSettings((current) => ({ ...current, allowDuringFullscreen: event.target.checked }));
+                }} />
+              </label>
+              <label className="setting-toggle">
                 <span>{settingsCopy.autoStart}</span>
                 <input type="checkbox" checked={settings.autoStart} disabled={!isTauri()} onChange={(event) => {
                   const enabled = event.target.checked;
@@ -753,10 +1018,27 @@ function App() {
                 <button onClick={(event) => { event.stopPropagation(); setSettingsOpen(true); }}>{settingsCopy.open}</button>
               </div>
               {(codexRows.length > 0 ? codexRows : [codex]).map(taskRow)}
+              {settings.nowPlayingEnabled && (
+                <section aria-label={settingsCopy.nowPlaying} className="now-playing">
+                  <h4>{settingsCopy.nowPlaying}</h4>
+                  {nowPlaying ? (
+                    <div className="now-playing-card">
+                      {nowPlaying.coverDataUrl
+                        ? <img alt="" className="now-playing-cover" src={nowPlaying.coverDataUrl} />
+                        : <div aria-hidden="true" className="now-playing-cover now-playing-placeholder">♫</div>}
+                      <div className="now-playing-info"><b>{nowPlaying.title}</b><span>{nowPlaying.artist}</span><small>{nowPlaying.playing ? settingsCopy.playing : settingsCopy.paused}</small></div>
+                      <div className="now-playing-actions">
+                        <button aria-label={nowPlaying.playing ? settingsCopy.pause : settingsCopy.play} onClick={(event) => { event.stopPropagation(); controlNowPlaying(nowPlaying.playing ? "pause" : "play"); }} type="button">{nowPlaying.playing ? "Ⅱ" : "▶"}</button>
+                        <button aria-label={settingsCopy.nextTrack} onClick={(event) => { event.stopPropagation(); controlNowPlaying("next"); }} type="button">»</button>
+                      </div>
+                    </div>
+                  ) : <p className="now-playing-empty">{settingsCopy.noMedia}</p>}
+                </section>
+              )}
               <h4>Chat{unreadCount > 0 ? ` · ${unreadCount} belum dibaca` : ""}</h4>
               {messages.slice(0, 3).map((message) => (
                 <div className="row" key={message.id}>
-                  <div className="avatar">{message.sender[0]}</div>
+                  <div className="avatar whatsapp-avatar" style={{ "--avatar-hue": avatarHue(message.sender) } as CSSProperties}>{initials(message.sender)}</div>
                   <div className="tx">
                     <b>{message.sender}</b>
                     <span>{message.body}</span>
@@ -792,7 +1074,9 @@ function App() {
           <button onClick={finishTask}>Task selesai</button>
           <button onClick={failTask}>Error</button>
           <button onClick={receiveMessage}>Chat masuk</button>
+          <button onClick={receiveMockCall}>Panggilan WhatsApp</button>
           <button onClick={showMockSystemAlert}>{systemCopy.demoAlert}</button>
+          <button onClick={showMockPermissionRequest}>{settingsCopy.mockPermissionRequest}</button>
           <button onClick={clearUnread}>Tandai dibaca</button>
         </nav>
       )}

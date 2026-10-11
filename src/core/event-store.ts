@@ -1,12 +1,19 @@
 export type AppEvent = {
   id: string;
-  source: "codex" | "antigravity" | "chat" | "system";
+  source: "ai" | "chat" | "system";
+  agent?: "codex" | "antigravity-cli" | "antigravity-ide" | "omp";
+  sessionId?: string;
   kind: "task" | "message" | "metric";
   status?: "running" | "done" | "error" | "needs_input" | "unread" | "warn" | "crit";
   title: string;
   body?: string;
   progress?: number;
   startedAt?: string;
+  cwd?: string;
+  pid?: number;
+  usage?: { tokens?: number; quotaLeft?: number };
+  actions?: Array<"approve" | "reject">;
+  actionNonce?: string;
   meta?: Record<string, unknown>;
 };
 
@@ -22,6 +29,10 @@ const priority = (event: AppEvent) => {
 const isUnreadChatMessage = (event: AppEvent) =>
   event.source === "chat" && event.kind === "message" && event.status === "unread";
 
+const eventKey = (event: AppEvent) => event.source === "ai" && event.agent && event.sessionId
+  ? `${event.agent}:${event.sessionId}`
+  : event.id;
+
 export class EventStore {
   private readonly events = new Map<string, AppEvent>();
   private readonly pending = new Map<string, AppEvent>();
@@ -31,21 +42,22 @@ export class EventStore {
   private readonly messageTimes = new Map<string, number>();
 
   upsert(event: AppEvent, receivedAt = Date.now()): void {
-    this.events.set(event.id, event);
+    const key = eventKey(event);
+    this.events.set(key, event);
     if (event.source === "chat" && event.kind === "message") {
-      this.observedAt.set(event.id, receivedAt);
+      this.observedAt.set(key, receivedAt);
       const createdAt = event.startedAt ? Date.parse(event.startedAt) : Number.NaN;
-      this.messageTimes.set(event.id, Number.isFinite(createdAt) ? createdAt : receivedAt);
+      this.messageTimes.set(key, Number.isFinite(createdAt) ? createdAt : receivedAt);
     }
     if (event.status === undefined || event.status === "running") {
-      this.pending.delete(event.id);
-      this.order.delete(event.id);
+      this.pending.delete(key);
+      this.order.delete(key);
       return;
     }
-    if (isUnreadChatMessage(event) || !this.order.has(event.id)) {
-      this.order.set(event.id, this.sequence++);
+    if (isUnreadChatMessage(event) || !this.order.has(key)) {
+      this.order.set(key, this.sequence++);
     }
-    this.pending.set(event.id, event);
+    this.pending.set(key, event);
   }
 
   all(): AppEvent[] {
@@ -60,9 +72,10 @@ export class EventStore {
   }
 
   dismissPeekGroup(ids: string[]): AppEvent | undefined {
-    for (const id of ids) {
-      this.pending.delete(id);
-      this.order.delete(id);
+    for (const [key, event] of this.pending) {
+      if (!ids.includes(event.id)) continue;
+      this.pending.delete(key);
+      this.order.delete(key);
     }
     return this.nextPeek();
   }
@@ -72,25 +85,29 @@ export class EventStore {
       priority(left) - priority(right)
       || (isUnreadChatMessage(left) && isUnreadChatMessage(right)
         ? this.compareChatMessages(left, right)
-        : (this.order.get(left.id) ?? 0) - (this.order.get(right.id) ?? 0)),
+        : (this.order.get(eventKey(left)) ?? 0) - (this.order.get(eventKey(right)) ?? 0)),
     )[0];
   }
 
   dismissPeek(): AppEvent | undefined {
     const current = this.nextPeek();
     if (current) {
-      this.pending.delete(current.id);
-      this.order.delete(current.id);
+      const key = eventKey(current);
+      this.pending.delete(key);
+      this.order.delete(key);
     }
     return this.nextPeek();
   }
 
   dismiss(id: string): void {
-    this.events.delete(id);
-    this.pending.delete(id);
-    this.order.delete(id);
-    this.observedAt.delete(id);
-    this.messageTimes.delete(id);
+    for (const [key, event] of this.events) {
+      if (event.id !== id) continue;
+      this.events.delete(key);
+      this.pending.delete(key);
+      this.order.delete(key);
+      this.observedAt.delete(key);
+      this.messageTimes.delete(key);
+    }
   }
 
   nextChatExpiry(): number | undefined {
@@ -104,20 +121,21 @@ export class EventStore {
 
   expireChats(now = Date.now()): string[] {
     const expired: string[] = [];
-    for (const [id, receivedAt] of this.observedAt) {
+    for (const [key, receivedAt] of this.observedAt) {
       if (now - receivedAt < CHAT_RETENTION_MS) continue;
-      expired.push(id);
-      this.observedAt.delete(id);
-      this.events.delete(id);
-      this.pending.delete(id);
-      this.order.delete(id);
-      this.messageTimes.delete(id);
+      const event = this.events.get(key);
+      if (event) expired.push(event.id);
+      this.observedAt.delete(key);
+      this.events.delete(key);
+      this.pending.delete(key);
+      this.order.delete(key);
+      this.messageTimes.delete(key);
     }
     return expired;
   }
 
   private compareChatMessages(left: AppEvent, right: AppEvent): number {
-    return (this.messageTimes.get(right.id) ?? 0) - (this.messageTimes.get(left.id) ?? 0)
-      || (this.order.get(right.id) ?? 0) - (this.order.get(left.id) ?? 0);
+    return (this.messageTimes.get(eventKey(right)) ?? 0) - (this.messageTimes.get(eventKey(left)) ?? 0)
+      || (this.order.get(eventKey(right)) ?? 0) - (this.order.get(eventKey(left)) ?? 0);
   }
 }
