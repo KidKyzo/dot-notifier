@@ -8,6 +8,12 @@
 
 A lightweight, non-intrusive Windows desktop overlay designed for multi-tasking developers. Dot Notifier places ambient, minimal indicators in your screen corner to track **AI Agent progress**, **Windows notifications**, and **system performance**—expanding into informative pills and panels only when you need them.
 
+## Demo
+
+![Dot Notifier mock demo showing ambient dots, grouped agent updates, expanded tasks, chat, and a system alert](assets/demo/dot-notifier-demo.gif)
+
+[Watch the 13-second HD video](assets/demo/dot-notifier-demo.mp4) · Captured from `pnpm dev:mock` with synthetic events.
+
 ---
 
 ## Overview & Concept
