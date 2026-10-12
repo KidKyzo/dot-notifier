@@ -1,16 +1,28 @@
-import { useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, MouseEvent } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { islandReducer } from "./core/island-state";
 import { CHAT_RETENTION_MS, EventStore, type AppEvent } from "./core/event-store";
 import { pruneExpiredMessages, upsertChatMessage } from "./core/chat-retention";
-import { primaryCodexTaskRows, upsertTask, validTaskUsage } from "./core/task-list";
+import {
+  aggregateTaskStatus,
+  primaryCodexTaskRows,
+  upsertTask,
+} from "./core/task-list";
 import { initialSystemMetrics, mockSystemAlert, parseSystemMetrics } from "./core/system-metrics";
 import { systemCopy } from "./core/system-copy";
 import { settingsCopy } from "./core/settings-copy";
 import { defaultSettings, loadSettings, parseMonitoredApps, type UserSettings } from "./core/settings";
 import { isIncomingWhatsAppCall, isWhatsAppNotification } from "./core/whatsapp-calls";
+import {
+  advanceSpringAxis,
+  createSpringAxis,
+  isSpringAxisSettled,
+  motionTokens,
+  retargetSpringAxis,
+} from "./core/motion";
+import type { SpringAxis } from "./core/motion";
 import {
   incomingMessages,
   emptyTasks,
@@ -22,11 +34,12 @@ import {
 } from "./core/mock";
 import "./App.css";
 
-type PulseSource = "codex" | "chat" | "system";
+type PulseSource = "ai" | "codex" | "chat" | "system";
 type DotStatus = DemoStatus | "warn" | "crit";
-type PeekInfo = { source: string; message: string; chatMessages: AppEvent[]; actionEvent?: AppEvent; chatSender?: string; chatApp?: string; incomingCall?: boolean };
+type PeekInfo = { source: string; message: string; chatMessages: AppEvent[]; agentEvents?: AppEvent[]; agentEventIds?: string[]; agentOverflowCount?: number; actionEvent?: AppEvent; chatSender?: string; chatApp?: string; incomingCall?: boolean };
 type MonitorOption = { key: string; label: string; width: number; height: number };
 type NowPlayingSnapshot = { title: string; artist: string; playing: boolean; coverDataUrl: string | null };
+type HudShape = { width: SpringAxis; height: SpringAxis; radius: SpringAxis; frame: number | null; lastFrame: number | null };
 
 const colors: Record<DotStatus, string> = {
   idle: "#8e8e93",
@@ -40,10 +53,10 @@ const colors: Record<DotStatus, string> = {
 
 const statusLabels: Record<DemoStatus, string> = {
   idle: "Idle",
-  running: "Berjalan",
-  done: "Selesai",
-  error: "Gagal",
-  needs_input: "Butuh izin",
+  running: "Running",
+  done: "Completed",
+  error: "Failed",
+  needs_input: "Needs permission",
 };
 
 const percent = (value: number | null) => value === null ? systemCopy.unavailable : `${Math.round(value)}%`;
@@ -132,6 +145,7 @@ function App() {
   const [state, dispatch] = useReducer(islandReducer, "idle");
   const [tasks, setTasks] = useState(() => isMockMode ? initialTasks : emptyTasks);
   const [messages, setMessages] = useState<DemoMessage[]>(() => isMockMode ? initialMessages : []);
+  const [exitingMessages, setExitingMessages] = useState<string[]>([]);
   const [systemMetrics, setSystemMetrics] = useState(initialSystemMetrics);
   const unreadCount = messages.filter((message) => message.unread).length;
   const [messageIndex, setMessageIndex] = useState(0);
@@ -142,6 +156,7 @@ function App() {
   const [quietEnvironment, setQuietEnvironment] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<UserSettings>(() => loadSettings(window.localStorage));
+  const [antigravityHooksEnabled, setAntigravityHooksEnabled] = useState(false);
   const [monitoredAppsText, setMonitoredAppsText] = useState(settings.monitoredApps.join(", "));
   const [notificationPermission, setNotificationPermission] = useState<boolean | null>(null);
   const [monitors, setMonitors] = useState<MonitorOption[]>([]);
@@ -149,6 +164,10 @@ function App() {
   const [nowPlayingTitleOverflows, setNowPlayingTitleOverflows] = useState(false);
   const eventStore = useRef(new EventStore());
   const hoverExpanded = useRef(false);
+  const hoverLeaveTimer = useRef<number | null>(null);
+  const collapseDelayTimer = useRef<number | null>(null);
+  const previousShellState = useRef(state);
+  const exitingMessageTimers = useRef(new Map<string, number>());
   const clickPinned = useRef(false);
   const quietEnvironmentRef = useRef(false);
   const pausedRef = useRef(paused);
@@ -158,10 +177,27 @@ function App() {
   const nowPlayingTitleRef = useRef<HTMLSpanElement>(null);
   const nowPlayingPeekRef = useRef<HTMLSpanElement>(null);
   const settingsRef = useRef(settings);
+  const hudShapeRef = useRef<HudShape>({
+    width: createSpringAxis(motionTokens.geometry.idle.width),
+    height: createSpringAxis(motionTokens.geometry.idle.height),
+    radius: createSpringAxis(motionTokens.geometry.idle.radius),
+    frame: null,
+    lastFrame: null,
+  });
 
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
-  const showEventPeek = (next: AppEvent) => {
+  const reportHitArea = useCallback(() => {
+    if (!isTauri()) return;
+    const hud = hudRef.current;
+    if (!hud) return;
+    const bounds = hud.getBoundingClientRect();
+    void invoke("update_hit_area", {
+      area: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
+    }).catch((error: unknown) => console.warn("Could not update overlay hit area", error));
+  }, []);
+
+  const showEventPeek = (next: AppEvent, groupedAgentEvents: AppEvent[] = [next]) => {
     const chatSource = (typeof next.meta?.sender === "string" && next.meta.sender)
       || (typeof next.meta?.app === "string" && next.meta.app)
       || "Notification";
@@ -173,7 +209,13 @@ function App() {
     const incomingCall = cardEnabled && isIncomingWhatsAppCall(next);
     setPeekInfo({
       source: next.source === "ai"
-        ? (next.agent === "codex" ? "Codex" : next.agent ?? "AI")
+        ? (next.agent === "codex"
+          ? "Codex"
+          : next.agent === "antigravity-cli"
+          ? "Antigravity CLI"
+          : next.agent === "antigravity-ide"
+          ? "Antigravity IDE"
+          : next.agent ?? "AI")
       : next.source === "system"
         ? systemCopy.system
         : chatSource,
@@ -181,12 +223,17 @@ function App() {
         ? next.status === "crit" ? systemCopy.criticalAlert : systemCopy.warningAlert
         : (next.body || next.title),
       chatMessages,
+      ...(groupedAgentEvents.length > 1 ? {
+        agentEvents: groupedAgentEvents.slice(0, 5),
+        agentEventIds: groupedAgentEvents.map((event) => event.id),
+        agentOverflowCount: Math.max(0, groupedAgentEvents.length - 5),
+      } : {}),
       ...(typeof next.meta?.app === "string" ? { chatApp: next.meta.app } : {}),
       ...(cardEnabled && next.source === "chat" ? { chatSender: sender } : {}),
       ...(incomingCall ? { incomingCall: true } : {}),
       ...(next.actions && next.actionNonce ? { actionEvent: next } : {}),
     });
-    setPulseSource(next.source === "ai" ? "codex" : next.source);
+    setPulseSource(next.source === "ai" ? "ai" : next.source);
     dispatch({ type: "set", state: "alert" });
   };
 
@@ -197,7 +244,10 @@ function App() {
       eventStore.current.dismissPeek();
       next = eventStore.current.nextPeek();
     }
-    if (next) showEventPeek(next);
+    if (next) {
+      const groupedEvents = eventStore.current.nextPeekGroup();
+      showEventPeek(next, groupedEvents);
+    }
   };
 
   useEffect(() => {
@@ -206,6 +256,36 @@ function App() {
       .then((granted) => setNotificationPermission(granted))
       .catch((error: unknown) => console.warn("Could not check notification permission", error));
   }, []);
+
+  useEffect(() => () => {
+    const frame = hudShapeRef.current.frame;
+    if (frame !== null) window.cancelAnimationFrame(frame);
+    if (hoverLeaveTimer.current !== null) window.clearTimeout(hoverLeaveTimer.current);
+    if (collapseDelayTimer.current !== null) window.clearTimeout(collapseDelayTimer.current);
+    exitingMessageTimers.current.forEach((timer) => window.clearTimeout(timer));
+  }, []);
+
+  useEffect(() => {
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const snapToCurrentTarget = () => {
+      if (!reducedMotion.matches) return;
+      const hud = hudRef.current;
+      const shape = hudShapeRef.current;
+      if (!hud) return;
+      if (shape.frame !== null) window.cancelAnimationFrame(shape.frame);
+      shape.frame = null;
+      shape.lastFrame = null;
+      shape.width = createSpringAxis(shape.width.target);
+      shape.height = createSpringAxis(shape.height.target);
+      shape.radius = createSpringAxis(shape.radius.target);
+      hud.style.setProperty("--hud-width", `${shape.width.position}px`);
+      hud.style.setProperty("--hud-height", `${shape.height.position}px`);
+      hud.style.setProperty("--hud-radius", `${shape.radius.position}px`);
+      reportHitArea();
+    };
+    reducedMotion.addEventListener("change", snapToCurrentTarget);
+    return () => reducedMotion.removeEventListener("change", snapToCurrentTarget);
+  }, [reportHitArea]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -270,6 +350,13 @@ function App() {
       console.warn("Could not save Dot Notifier settings", error);
     }
   }, [settings]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    void invoke<boolean>("get_antigravity_hooks_enabled")
+      .then(setAntigravityHooksEnabled)
+      .catch((error: unknown) => console.warn("Could not read Antigravity hook status", error));
+  }, []);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -425,14 +512,15 @@ function App() {
         if (nextMetrics) setSystemMetrics(nextMetrics);
         if (payload.status === undefined) return;
       }
-      if (payload.source === "ai" && payload.agent === "codex"
+      if (payload.source === "ai"
+          && (payload.agent === "codex" || payload.agent === "antigravity-cli" || payload.agent === "antigravity-ide")
           && payload.kind === "task"
           && (payload.status === "running" || payload.status === "done"
             || payload.status === "error" || payload.status === "needs_input")) {
         const task: DemoTask = {
           id: payload.id,
-          source: "codex",
-          name: `Codex · ${payload.id.slice(0, 8)}`,
+          source: payload.agent,
+          name: `${payload.agent === "codex" ? "Codex" : payload.agent === "antigravity-cli" ? "Antigravity CLI" : "Antigravity IDE"} · ${payload.id.slice(0, 8)}`,
           status: payload.status,
           title: payload.title,
           ...(payload.body ? { detail: payload.body } : {}),
@@ -479,17 +567,13 @@ function App() {
     if (!isTauri()) return;
     const hud = hudRef.current;
     if (!hud) return;
-    const updateHitArea = () => {
-      const bounds = hud.getBoundingClientRect();
-      void invoke("update_hit_area", {
-        area: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
-      }).catch((error: unknown) => console.warn("Could not update overlay hit area", error));
-    };
-    const observer = new ResizeObserver(updateHitArea);
+    const observer = new ResizeObserver(() => {
+      if (hudShapeRef.current.frame === null) reportHitArea();
+    });
     observer.observe(hud);
-    updateHitArea();
+    reportHitArea();
     return () => observer.disconnect();
-  }, []);
+  }, [reportHitArea]);
 
   useEffect(() => {
     if (state === "alert") {
@@ -501,14 +585,13 @@ function App() {
 
     if (state === "peek") {
       const timer = window.setTimeout(() => {
-        const groupedChatIds = peekInfo.chatMessages.length > 1
+        const groupedIds = peekInfo.agentEventIds ?? (peekInfo.chatMessages.length > 1
           ? peekInfo.chatMessages.map((event) => event.id)
-          : [];
-        const next = groupedChatIds.length > 0
-          ? eventStore.current.dismissPeekGroup(groupedChatIds)
-          : eventStore.current.dismissPeek();
-        if (next) {
-          showEventPeek(next);
+          : []);
+        if (groupedIds.length > 1) eventStore.current.dismissPeekGroup(groupedIds);
+        else eventStore.current.dismissPeek();
+        if (eventStore.current.nextPeek()) {
+          showNextQueuedPeek();
         } else {
           dispatch({ type: "dismiss" });
           setPulseSource(null);
@@ -536,23 +619,106 @@ function App() {
   useLayoutEffect(() => {
     const hud = hudRef.current;
     if (!hud) return;
+    const previousState = previousShellState.current;
+    previousShellState.current = state;
+    if (state !== "idle" && collapseDelayTimer.current !== null) {
+      window.clearTimeout(collapseDelayTimer.current);
+      collapseDelayTimer.current = null;
+    }
 
+    let width: number;
+    let height: number = motionTokens.geometry.idle.height;
+    let radius: number = motionTokens.geometry.idle.radius;
     if (state === "peek") {
-      hud.style.width = "300px";
-      hud.style.height = peekInfo.chatMessages.length > 1
-        ? `${56 + peekInfo.chatMessages.length * 32}px`
-        : peekInfo.incomingCall ? "92px" : peekInfo.chatSender ? "76px" : peekInfo.actionEvent ? "72px" : "44px";
+      width = motionTokens.geometry.peek.width;
+      height = (peekInfo.agentEvents?.length ?? 0) > 1
+        ? motionTokens.geometry.tallPeek.multiMessageBase + Math.min(peekInfo.agentEvents?.length ?? 0, 5) * motionTokens.geometry.tallPeek.rowHeight
+        : peekInfo.chatMessages.length > 1
+        ? motionTokens.geometry.tallPeek.multiMessageBase + peekInfo.chatMessages.length * motionTokens.geometry.tallPeek.rowHeight
+        : peekInfo.incomingCall ? motionTokens.geometry.tallPeek.call
+          : peekInfo.chatSender ? motionTokens.geometry.tallPeek.chat
+            : peekInfo.actionEvent ? motionTokens.geometry.tallPeek.approval
+              : motionTokens.geometry.peek.height;
+      radius = motionTokens.geometry.peek.radius;
     } else if (state === "expanded" && panelRef.current) {
-      hud.style.width = "320px";
-      hud.style.height = `${panelRef.current.clientHeight}px`;
+      width = motionTokens.geometry.expanded.width;
+      height = panelRef.current.clientHeight;
+      radius = motionTokens.geometry.expanded.radius;
     } else {
       const showNowPlaying = settings.nowPlayingEnabled && settings.nowPlayingPeekEnabled && nowPlaying?.playing;
       const labelWidth = nowPlayingPeekRef.current?.getBoundingClientRect().width ?? 190;
-      const peekWidth = Math.min(276, Math.max(145, Math.ceil(labelWidth + 84)));
-      hud.style.width = showNowPlaying ? `${peekWidth}px` : "64px";
-      hud.style.height = "24px";
+      const peekWidth = Math.min(
+        motionTokens.geometry.peekWidth.maximum,
+        Math.max(motionTokens.geometry.peekWidth.minimum, Math.ceil(labelWidth + motionTokens.geometry.peekWidth.labelPadding)),
+      );
+      width = showNowPlaying ? peekWidth : motionTokens.geometry.idle.width;
     }
-  }, [state, tasks, messages, peekInfo, systemMetrics, settingsOpen, settings.nowPlayingEnabled, settings.nowPlayingPeekEnabled, nowPlaying]);
+
+    const shape = hudShapeRef.current;
+    if (state === "idle" && collapseDelayTimer.current !== null) return;
+    if (
+      shape.frame === null
+      && shape.width.target === width
+      && shape.height.target === height
+      && shape.radius.target === radius
+      && isSpringAxisSettled(shape.width)
+      && isSpringAxisSettled(shape.height)
+      && isSpringAxisSettled(shape.radius)
+    ) return;
+
+    const startAnimation = () => {
+      shape.width = retargetSpringAxis(shape.width, width);
+      shape.height = retargetSpringAxis(shape.height, height);
+      shape.radius = retargetSpringAxis(shape.radius, radius);
+
+      const applyShape = () => {
+        hud.style.setProperty("--hud-width", `${shape.width.position}px`);
+        hud.style.setProperty("--hud-height", `${shape.height.position}px`);
+        hud.style.setProperty("--hud-radius", `${shape.radius.position}px`);
+        reportHitArea();
+      };
+
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        if (shape.frame !== null) window.cancelAnimationFrame(shape.frame);
+        shape.frame = null;
+        shape.lastFrame = null;
+        shape.width = createSpringAxis(width);
+        shape.height = createSpringAxis(height);
+        shape.radius = createSpringAxis(radius);
+        applyShape();
+        return;
+      }
+
+      if (shape.frame === null) {
+        const animate = (now: number) => {
+          const deltaSeconds = shape.lastFrame === null ? 1 / 60 : (now - shape.lastFrame) / 1000;
+          shape.lastFrame = now;
+          shape.width = advanceSpringAxis(shape.width, deltaSeconds, motionTokens.spring.morph);
+          shape.height = advanceSpringAxis(shape.height, deltaSeconds, motionTokens.spring.morph);
+          shape.radius = advanceSpringAxis(shape.radius, deltaSeconds, motionTokens.spring.morph);
+          applyShape();
+
+          if (isSpringAxisSettled(shape.width) && isSpringAxisSettled(shape.height) && isSpringAxisSettled(shape.radius)) {
+            shape.frame = null;
+            shape.lastFrame = null;
+            return;
+          }
+          shape.frame = window.requestAnimationFrame(animate);
+        };
+        shape.frame = window.requestAnimationFrame(animate);
+      }
+    };
+
+    const isLeavingContent = state === "idle" && (previousState === "peek" || previousState === "expanded");
+    if (isLeavingContent) {
+      collapseDelayTimer.current = window.setTimeout(() => {
+        collapseDelayTimer.current = null;
+        startAnimation();
+      }, motionTokens.timing.contentOutMs);
+      return;
+    }
+    startAnimation();
+  }, [state, tasks, messages, peekInfo, systemMetrics, settingsOpen, settings.nowPlayingEnabled, settings.nowPlayingPeekEnabled, nowPlaying, reportHitArea]);
 
   useLayoutEffect(() => {
     const title = nowPlayingTitleRef.current;
@@ -569,7 +735,29 @@ function App() {
 
   const codexRows = primaryCodexTaskRows(tasks);
   const codex = codexRows[0] ?? initialTasks[0];
-  const activeTask = codex;
+  const antigravityTasks = tasks.filter((task) => task.source === "antigravity-cli" || task.source === "antigravity-ide");
+  const activeAntigravityTasks = antigravityTasks
+    .filter((task) => task.status === "running" || task.status === "needs_input")
+    .sort((left, right) => (right.startedAt ?? 0) - (left.startedAt ?? 0));
+  const antigravityRows = activeAntigravityTasks.length > 0
+    ? activeAntigravityTasks
+    : [...antigravityTasks].sort((left, right) => (right.startedAt ?? 0) - (left.startedAt ?? 0)).slice(0, 1);
+  if (antigravityRows.length === 0 && antigravityHooksEnabled) {
+    antigravityRows.push({
+      id: "antigravity-idle",
+      source: "antigravity-ide",
+      name: "Antigravity",
+      status: "idle",
+      title: settingsCopy.noActiveTask,
+      progress: 0,
+    });
+  }
+  const taskGroups = [
+    { name: "Codex", rows: codexRows.length > 0 ? codexRows : [codex] },
+    ...(antigravityRows.length > 0 ? [{ name: "Antigravity", rows: antigravityRows }] : []),
+  ];
+  const aiStatus = aggregateTaskStatus(tasks);
+  const aiHasRunning = tasks.some((task) => task.status === "running");
   const isOpen = state === "expanded";
   const systemLoad = [systemMetrics.current.cpuPercent, systemMetrics.current.gpuPercent]
     .filter((value): value is number => value !== null)
@@ -590,23 +778,23 @@ function App() {
   const startTask = () => {
     const startedAt = Date.now();
     setTasks((current) => current.map((task) => task.source === "codex"
-      ? { ...task, status: "running", title: "migrasi database", progress: 0.42, startedAt }
+      ? { ...task, status: "running", title: "database migration", progress: 0.42, startedAt }
       : task));
-    showPeek("codex", "Codex", "mulai: migrasi database");
+    showPeek("codex", "Codex", "Starting: database migration");
   };
 
   const finishTask = () => {
     setTasks((current) => current.map((task) => task.source === "codex"
       ? { ...task, status: "done", progress: 1 }
       : task));
-    showPeek("codex", "Codex", `${codex.title} selesai`);
+    showPeek("codex", "Codex", `${codex.title} completed`);
   };
 
   const failTask = () => {
     setTasks((current) => current.map((task) => task.source === "codex"
       ? { ...task, status: "error" }
       : task));
-    showPeek("codex", "Codex", `${codex.title} gagal: 2 tes tidak lulus`);
+    showPeek("codex", "Codex", `${codex.title} failed: 2 tests failed`);
   };
 
   const receiveMessage = () => {
@@ -648,6 +836,51 @@ function App() {
     setPeekInfo({ source: "WhatsApp", message: event.body ?? "", chatMessages: [], chatSender: "Rina", incomingCall: settings.whatsappCardEnabled });
     setPulseSource("chat");
     dispatch({ type: "set", state: "alert" });
+  };
+
+  const showMockAntigravityTask = (source: "antigravity-cli" | "antigravity-ide") => {
+    const id = source === "antigravity-cli"
+      ? "a0a0a0a0-0000-4000-8000-000000000044"
+      : "a0a0a0a0-0000-4000-8000-000000000045";
+    const agentName = source === "antigravity-cli" ? "Antigravity CLI" : "Antigravity IDE";
+    const previous = tasks.find((task) => task.id === id);
+    const status = previous?.status === "running" ? "done" : "running";
+    setTasks((current) => {
+      return upsertTask(current, {
+        id,
+        source,
+        name: `${agentName} · ${id.slice(0, 8)}`,
+        status,
+        title: `${agentName} task ${status === "running" ? "running" : "completed"}`,
+        progress: status === "done" ? 1 : 0.6,
+        startedAt: previous?.startedAt ?? Date.now(),
+      });
+    });
+    showPeek("ai", agentName, `${agentName} task ${status === "running" ? "running" : "completed"}`);
+  };
+
+  const showMockAgentBurst = () => {
+    const receivedAt = Date.now();
+    const sessionId = `mock-agent-burst-${receivedAt}`;
+    eventStore.current.upsert({
+      id: `mock-codex-${receivedAt}`,
+      source: "ai",
+      agent: "codex",
+      sessionId: `${sessionId}-codex`,
+      kind: "task",
+      status: "done",
+      title: "Database migration completed",
+    }, receivedAt);
+    eventStore.current.upsert({
+      id: `mock-antigravity-${receivedAt}`,
+      source: "ai",
+      agent: "antigravity-cli",
+      sessionId: `${sessionId}-antigravity`,
+      kind: "task",
+      status: "needs_input",
+      title: "Package installation needs permission",
+    }, receivedAt);
+    showNextQueuedPeek();
   };
 
   const showMockSystemAlert = () => {
@@ -695,7 +928,14 @@ function App() {
 
   const dismissMessage = (id: string) => {
     eventStore.current.dismiss(id);
-    setMessages((current) => current.filter((message) => message.id !== id));
+    if (exitingMessageTimers.current.has(id)) return;
+    setExitingMessages((current) => [...current, id]);
+    const timer = window.setTimeout(() => {
+      setMessages((current) => current.filter((message) => message.id !== id));
+      setExitingMessages((current) => current.filter((messageId) => messageId !== id));
+      exitingMessageTimers.current.delete(id);
+    }, motionTokens.timing.rowExitMs);
+    exitingMessageTimers.current.set(id, timer);
     if (unreadCount <= 1) {
       setPulseSource((current) => current === "chat" ? null : current);
       if (pulseSource === "chat") dispatch({ type: "dismiss" });
@@ -704,6 +944,8 @@ function App() {
 
   const onHudClick = (event: MouseEvent<HTMLElement>) => {
     event.stopPropagation();
+    if (hoverLeaveTimer.current !== null) window.clearTimeout(hoverLeaveTimer.current);
+    hoverLeaveTimer.current = null;
     if (isOpen) {
       clickPinned.current = false;
       hoverExpanded.current = false;
@@ -718,52 +960,59 @@ function App() {
   const onHudKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
+      if (hoverLeaveTimer.current !== null) window.clearTimeout(hoverLeaveTimer.current);
+      hoverLeaveTimer.current = null;
       clickPinned.current = !isOpen;
       hoverExpanded.current = false;
       dispatch({ type: "set", state: isOpen ? "idle" : "expanded" });
     } else if (event.key === "Escape") {
+      if (hoverLeaveTimer.current !== null) window.clearTimeout(hoverLeaveTimer.current);
+      hoverLeaveTimer.current = null;
       clickPinned.current = false;
       hoverExpanded.current = false;
       dispatch({ type: "set", state: "idle" });
     }
   };
 
-  const taskRow = (task: DemoTask) => {
-    const subtitle = task.status === "running"
-      ? `${task.title} · ${durationLabel(task.startedAt)}`
-      : task.status === "idle"
-        ? task.title
-        : `${task.title} · ${statusLabels[task.status]}`;
-
-    const validUsage = validTaskUsage(task.usage);
-    const usageLabel = validUsage
-      ? settingsCopy.taskUsage(validUsage.tokens, validUsage.quotaLeft)
-      : undefined;
-    const focusTask = () => {
-      if (!isTauri() || task.pid === undefined) return;
-      void invoke("focus_process", { pid: task.pid }).catch((error: unknown) => {
-        console.warn("Could not focus task window", error);
-      });
+  const taskGroupRow = (group: { name: string; rows: DemoTask[] }, index: number) => {
+    const indicatorOrder: Record<DemoStatus, number> = {
+      needs_input: 0,
+      error: 1,
+      running: 2,
+      done: 3,
+      idle: 4,
     };
-
+    const indicator = [...group.rows].sort((left, right) => indicatorOrder[left.status] - indicatorOrder[right.status])[0];
     return (
-      <button className="row task-row" disabled={task.pid === undefined || !isTauri()} key={task.id} onClick={(event) => {
-        event.stopPropagation();
-        focusTask();
-      }} type="button">
-        <Dot status={task.status} />
+      <div className="row task-agent-row" key={group.name} style={{ "--row-index": index } as CSSProperties}>
+        <Dot status={indicator?.status ?? "idle"} />
         <div className="tx">
-          <b>{task.name}</b>
-          <span>{subtitle}</span>
-          {usageLabel && <span className="task-usage">{usageLabel}</span>}
-          {task.detail && <span className="task-detail">{task.detail}</span>}
-          {task.status === "running" && (
-            <div className="bar" style={{ "--bar-color": colors.running } as CSSProperties}>
-              <u style={{ width: `${Math.round(task.progress * 100)}%` }} />
-            </div>
-          )}
+          <b>{group.name}</b>
+          {group.rows.map((task) => {
+            const title = task.detail ?? task.title;
+            const subtitle = task.status === "running"
+              ? `${title} · ${durationLabel(task.startedAt)}`
+              : task.status === "idle"
+                ? title
+                : `${title} · ${statusLabels[task.status]}`;
+            const focusTask = () => {
+              if (!isTauri() || task.pid === undefined) return;
+              void invoke("focus_process", { pid: task.pid }).catch((error: unknown) => {
+                console.warn("Could not focus task window", error);
+              });
+            };
+
+            return (
+              <button className="task-summary" disabled={task.pid === undefined || !isTauri()} key={task.id} onClick={(event) => {
+                event.stopPropagation();
+                focusTask();
+              }} type="button">
+                <span>{subtitle}</span>
+              </button>
+            );
+          })}
         </div>
-      </button>
+      </div>
     );
   };
 
@@ -772,8 +1021,8 @@ function App() {
       {isMockMode && (
         <p className="hint">
           <b>Dot Notifier</b>
-          Arahkan kursor ke dot, atau picu event dari tombol di bawah. Di layar sentuh, ketuk dot.
-          {(paused || quietMode) && <span className="tray-status">{paused ? "Notifikasi dijeda" : "Mode senyap"}</span>}
+          Hover over a dot or trigger an event with the buttons below. On touch screens, tap a dot.
+          {(paused || quietMode) && <span className="tray-status">{paused ? "Notifications paused" : "Quiet mode"}</span>}
         </p>
       )}
 
@@ -785,19 +1034,26 @@ function App() {
         onClick={onHudClick}
         onKeyDown={onHudKeyDown}
         onMouseEnter={() => {
+          if (hoverLeaveTimer.current !== null) window.clearTimeout(hoverLeaveTimer.current);
+          hoverLeaveTimer.current = null;
           if (clickPinned.current) return;
           hoverExpanded.current = true;
           dispatch({ type: "hover", active: true });
         }}
         onMouseLeave={() => {
           if (!hoverExpanded.current || clickPinned.current) return;
-          hoverExpanded.current = false;
-          dispatch({ type: "hover", active: false });
+          if (hoverLeaveTimer.current !== null) window.clearTimeout(hoverLeaveTimer.current);
+          hoverLeaveTimer.current = window.setTimeout(() => {
+            hoverExpanded.current = false;
+            hoverLeaveTimer.current = null;
+            dispatch({ type: "hover", active: false });
+          }, motionTokens.timing.hoverLeaveDelayMs);
         }}
         ref={hudRef}
         role="button"
         tabIndex={0}
       >
+        <div className="hud-content">
         <div className={`layer dots${settings.nowPlayingEnabled && settings.nowPlayingPeekEnabled && nowPlaying?.playing ? " dots-now-playing" : ""}`}>
           {settings.nowPlayingEnabled && settings.nowPlayingPeekEnabled && nowPlaying?.playing && (
             <span className="now-playing-peek" ref={nowPlayingPeekRef} title={`${settingsCopy.nowPlaying} — ${nowPlaying.title}`}>
@@ -810,13 +1066,37 @@ function App() {
               </span>
             </span>
           )}
-          <Dot status={activeTask.status} progress={activeTask.progress} ring={activeTask.status === "running"} pulse={pulseSource === "codex"} />
+          <Dot
+            status={aiHasRunning ? "running" : aiStatus}
+            pulse={pulseSource === "ai" || pulseSource === "codex"}
+            className={aiHasRunning ? "active" : ""}
+          />
           <Dot status={unreadCount > 0 ? "done" : "idle"} badge={unreadCount > 0} pulse={pulseSource === "chat"} />
           <Dot status={systemStatus} progress={systemLoad / 100} ring={systemLoad > 0} pulse={pulseSource === "system"} />
         </div>
 
-        <div className={`layer peek${peekInfo.chatMessages.length > 1 ? " peek-multi" : ""}${peekInfo.actionEvent ? " peek-approval" : ""}`}>
-          {peekInfo.chatMessages.length > 1 ? (
+        <div className={`layer peek${(peekInfo.chatMessages.length > 1 || (peekInfo.agentEvents?.length ?? 0) > 1) ? " peek-multi" : ""}${peekInfo.actionEvent ? " peek-approval" : ""}`}>
+          {(peekInfo.agentEvents?.length ?? 0) > 1 ? (
+            <div className="peek-agent-list">
+              {peekInfo.agentEvents?.map((event) => {
+                const agent = event.agent === "codex" ? "Codex"
+                  : event.agent === "antigravity-cli" ? "Antigravity CLI"
+                    : event.agent === "antigravity-ide" ? "Antigravity IDE"
+                      : event.agent ?? "AI";
+                const status: DotStatus = event.status === "error" || event.status === "needs_input"
+                  || event.status === "done" || event.status === "warn" || event.status === "crit"
+                  ? event.status
+                  : "running";
+                return (
+                  <div className="peek-agent-item" key={`${event.agent ?? "ai"}:${event.sessionId ?? event.id}`}>
+                    <Dot status={status} />
+                    <div className="peek-agent-copy"><b>{agent}</b><span>{event.body || event.title}</span></div>
+                  </div>
+                );
+              })}
+              {(peekInfo.agentOverflowCount ?? 0) > 0 && <span className="peek-agent-overflow">+{peekInfo.agentOverflowCount} more</span>}
+            </div>
+          ) : peekInfo.chatMessages.length > 1 ? (
             <>
               <div className="peek-group-heading">
                 <Dot status="done" />
@@ -845,7 +1125,7 @@ function App() {
                     if (isTauri()) void invoke("open_whatsapp").catch((error: unknown) => console.warn("Could not open WhatsApp", error));
                   }} type="button">{settingsCopy.openWhatsApp}</button>}
                 </div>
-              ) : <><Dot status={pulseSource === "system" ? systemStatus : pulseSource === "chat" ? "done" : codex.status} /><b>{peekInfo.source}</b><span>{peekInfo.message}</span></>}
+              ) : <><Dot status={pulseSource === "system" ? systemStatus : pulseSource === "chat" ? "done" : aiStatus} /><b>{peekInfo.source}</b><span>{peekInfo.message}</span></>}
             </>
           )}
           {peekInfo.actionEvent?.actionNonce && (
@@ -959,6 +1239,15 @@ function App() {
                 </div>
               )}
               <label className="setting-toggle">
+                <span>{settingsCopy.antigravityHooks}</span>
+                <input type="checkbox" checked={antigravityHooksEnabled} disabled={!isTauri()} onChange={(event) => {
+                  const enabled = event.target.checked;
+                  void invoke<boolean>("set_antigravity_hooks_enabled", { enabled })
+                    .then(setAntigravityHooksEnabled)
+                    .catch((error: unknown) => console.warn("Could not update Antigravity hooks", error));
+                }} />
+              </label>
+              <label className="setting-toggle">
                 <span>{settingsCopy.nowPlaying}</span>
                 <input type="checkbox" checked={settings.nowPlayingEnabled} onChange={(event) => {
                   setSettings((current) => ({ ...current, nowPlayingEnabled: event.target.checked, nowPlayingPeekEnabled: event.target.checked ? current.nowPlayingPeekEnabled : false }));
@@ -1014,10 +1303,10 @@ function App() {
           ) : (
             <>
               <div className="panel-heading">
-                <h4>Task AI</h4>
+              <h4>AI Tasks</h4>
                 <button onClick={(event) => { event.stopPropagation(); setSettingsOpen(true); }}>{settingsCopy.open}</button>
               </div>
-              {(codexRows.length > 0 ? codexRows : [codex]).map(taskRow)}
+              {taskGroups.map(taskGroupRow)}
               {settings.nowPlayingEnabled && (
                 <section aria-label={settingsCopy.nowPlaying} className="now-playing">
                   <h4>{settingsCopy.nowPlaying}</h4>
@@ -1035,9 +1324,9 @@ function App() {
                   ) : <p className="now-playing-empty">{settingsCopy.noMedia}</p>}
                 </section>
               )}
-              <h4>Chat{unreadCount > 0 ? ` · ${unreadCount} belum dibaca` : ""}</h4>
-              {messages.slice(0, 3).map((message) => (
-                <div className="row" key={message.id}>
+              <h4>Chat{unreadCount > 0 ? ` · ${unreadCount} unread` : ""}</h4>
+              {messages.slice(0, 3).map((message, index) => (
+                <div className={`row${exitingMessages.includes(message.id) ? " row-exit" : ""}`} key={message.id} style={{ "--row-index": index } as CSSProperties}>
                   <div className="avatar whatsapp-avatar" style={{ "--avatar-hue": avatarHue(message.sender) } as CSSProperties}>{initials(message.sender)}</div>
                   <div className="tx">
                     <b>{message.sender}</b>
@@ -1066,18 +1355,22 @@ function App() {
             </>
           )}
         </div>
+        </div>
       </section>
 
       {import.meta.env.DEV && (
         <nav aria-label="Mock event controls" className="controls">
-          <button onClick={startTask}>Mulai task Codex</button>
-          <button onClick={finishTask}>Task selesai</button>
+          <button onClick={startTask}>Start Codex task</button>
+          <button onClick={showMockAgentBurst}>Codex + Antigravity at once</button>
+          <button onClick={() => showMockAntigravityTask("antigravity-cli")}>Antigravity CLI task</button>
+          <button onClick={() => showMockAntigravityTask("antigravity-ide")}>Antigravity IDE task</button>
+          <button onClick={finishTask}>Task completed</button>
           <button onClick={failTask}>Error</button>
-          <button onClick={receiveMessage}>Chat masuk</button>
-          <button onClick={receiveMockCall}>Panggilan WhatsApp</button>
+          <button onClick={receiveMessage}>Incoming chat</button>
+          <button onClick={receiveMockCall}>WhatsApp call</button>
           <button onClick={showMockSystemAlert}>{systemCopy.demoAlert}</button>
           <button onClick={showMockPermissionRequest}>{settingsCopy.mockPermissionRequest}</button>
-          <button onClick={clearUnread}>Tandai dibaca</button>
+          <button onClick={clearUnread}>Mark as read</button>
         </nav>
       )}
     </main>

@@ -110,5 +110,28 @@ command = 'powershell -NoProfile -ExecutionPolicy Bypass -File "C:\\path\\to\\Do
 The hook only reports that Codex is waiting. Open Codex to inspect and answer
 the permission prompt there.
 
+Antigravity CLI and IDE task status is opt-in from Settings. Enabling it copies
+`scripts/antigravity-notify.ps1` into Dot Notifier's local data directory and
+adds the `dot-notifier-agent-status` entry to the user's
+`~/.gemini/config/hooks.json`, preserving other hooks and backing up an
+existing file before changing it. Turning the setting off removes only that
+entry. No hook configuration is edited at app startup.
+
+The adapter registers `PreInvocation` and `Stop` observers. It prints `{}` to
+stdout and sends a minimal status event in a detached process, so hook output
+never allows or denies an Antigravity action. It sends `running` at invocation,
+and maps `Stop` to `done`, `error`, or `running` according to `fullyIdle` and
+whether an error occurred. The event uses `conversationId` for both `id` and
+`sessionId`, and identifies CLI versus IDE from the documented transcript path.
+If `conversationId` is absent, the UUID can be recovered from that path. The
+adapter never opens `transcript.jsonl` or forwards error details, workspace
+paths, or conversation content. The delivered event upserts by agent and
+conversation ID.
+
+The official Antigravity hook contract is documented at
+<https://antigravity.google/docs/hooks>. The installed `agy` version and IDE
+runtime still require manual verification; see `docs/spikes/antigravity-cli.md`
+and `docs/spikes/antigravity-ide.md`.
+
 The protocol and schema version must be reviewed together before changing
 either one.

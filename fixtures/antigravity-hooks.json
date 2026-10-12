@@ -1,0 +1,41 @@
+{
+  "cli": {
+    "valid": {
+      "conversationId": "550e8400-e29b-41d4-a716-446655440000",
+      "transcriptPath": "C:\\Users\\Example\\.gemini\\antigravity-cli\\brain\\550e8400-e29b-41d4-a716-446655440000\\.system_generated\\logs\\transcript.jsonl",
+      "terminationReason": "model_stop",
+      "fullyIdle": true
+    },
+    "malformed": {
+      "conversationId": "not-a-uuid",
+      "transcriptPath": "C:\\Users\\Example\\.gemini\\antigravity-cli\\brain\\not-a-uuid\\.system_generated\\logs\\transcript.jsonl"
+    },
+    "unknownFields": {
+      "conversationId": "550e8400-e29b-41d4-a716-446655440001",
+      "transcriptPath": "C:\\Users\\Example\\.gemini\\antigravity-cli\\brain\\550e8400-e29b-41d4-a716-446655440001\\.system_generated\\logs\\transcript.jsonl",
+      "terminationReason": "model_stop",
+      "fullyIdle": true,
+      "futureField": { "ignored": true }
+    }
+  },
+  "ide": {
+    "valid": {
+      "conversationId": "550e8400-e29b-41d4-a716-446655440002",
+      "transcriptPath": "C:\\Users\\Example\\.gemini\\antigravity-ide\\brain\\550e8400-e29b-41d4-a716-446655440002\\.system_generated\\logs\\transcript.jsonl",
+      "terminationReason": "error",
+      "error": "synthetic error",
+      "fullyIdle": true
+    },
+    "malformed": {
+      "conversationId": "not-a-uuid",
+      "transcriptPath": "C:\\Users\\Example\\.gemini\\antigravity-ide\\brain\\not-a-uuid\\.system_generated\\logs\\transcript.jsonl"
+    },
+    "unknownFields": {
+      "transcriptPath": "C:\\Users\\Example\\.gemini\\antigravity-ide\\brain\\550e8400-e29b-41d4-a716-446655440003\\.system_generated\\logs\\transcript.jsonl",
+      "terminationReason": "model_stop",
+      "fullyIdle": true,
+      "conversationId": "550e8400-e29b-41d4-a716-446655440003",
+      "futureField": { "transcript": "ignored" }
+    }
+  }
+}

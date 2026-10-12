@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { DemoTask } from "./mock";
-import { primaryCodexTask, primaryCodexTaskRows, upsertTask, validTaskUsage } from "./task-list";
+import {
+  aggregateTaskProgress,
+  aggregateTaskStatus,
+  primaryCodexTask,
+  primaryCodexTaskRows,
+  upsertTask,
+  validTaskUsage,
+} from "./task-list";
 
 const task = (id: string, status: DemoTask["status"], startedAt?: number): DemoTask => ({
   id,
@@ -68,5 +75,70 @@ describe("task usage validation", () => {
   it("ignores invalid usage values", () => {
     expect(validTaskUsage({ tokens: -1, quotaLeft: 2 })).toBeUndefined();
     expect(validTaskUsage({ tokens: Number.NaN, quotaLeft: Number.POSITIVE_INFINITY })).toBeUndefined();
+  });
+});
+
+describe("aggregate dot color / status (F30)", () => {
+  const agentTask = (id: string, source: DemoTask["source"], status: DemoTask["status"], progress = 0): DemoTask => ({
+    id,
+    source,
+    name: `${source} · ${id}`,
+    status,
+    title: `Task ${id}`,
+    progress,
+  });
+
+  it("returns idle when there are no tasks or only idle tasks", () => {
+    expect(aggregateTaskStatus([])).toBe("idle");
+    expect(aggregateTaskStatus([agentTask("1", "codex", "idle")])).toBe("idle");
+    expect(aggregateTaskStatus([
+      agentTask("1", "codex", "idle"),
+      agentTask("2", "antigravity-ide", "idle"),
+    ])).toBe("idle");
+  });
+
+  it("prioritizes needs_input above error, running, and done", () => {
+    const tasks = [
+      agentTask("1", "codex", "running", 0.5),
+      agentTask("2", "antigravity-cli", "needs_input"),
+      agentTask("3", "antigravity-ide", "error"),
+    ];
+    expect(aggregateTaskStatus(tasks)).toBe("needs_input");
+  });
+
+  it("prioritizes error above running and done", () => {
+    const tasks = [
+      agentTask("1", "codex", "running", 0.5),
+      agentTask("2", "antigravity-ide", "error"),
+      agentTask("3", "antigravity-cli", "done", 1),
+    ];
+    expect(aggregateTaskStatus(tasks)).toBe("error");
+  });
+
+  it("prioritizes running above done", () => {
+    const tasks = [
+      agentTask("1", "codex", "done", 1),
+      agentTask("2", "antigravity-ide", "running", 0.7),
+    ];
+    expect(aggregateTaskStatus(tasks)).toBe("running");
+  });
+
+  it("returns done when an agent is done and no other agent is active", () => {
+    const tasks = [
+      agentTask("1", "codex", "idle"),
+      agentTask("2", "antigravity-ide", "done", 1),
+    ];
+    expect(aggregateTaskStatus(tasks)).toBe("done");
+  });
+
+  it("calculates average progress of running tasks and 0 when none running", () => {
+    expect(aggregateTaskProgress([])).toBe(0);
+    expect(aggregateTaskProgress([agentTask("1", "codex", "idle")])).toBe(0);
+    expect(aggregateTaskProgress([agentTask("1", "codex", "running", 0.4)])).toBe(0.4);
+    expect(aggregateTaskProgress([
+      agentTask("1", "codex", "running", 0.2),
+      agentTask("2", "antigravity-ide", "running", 0.6),
+      agentTask("3", "antigravity-cli", "done", 1),
+    ])).toBe(0.4);
   });
 });

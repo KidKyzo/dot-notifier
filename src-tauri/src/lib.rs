@@ -12,6 +12,8 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{Emitter, Manager, PhysicalPosition, WebviewWindow};
 
+mod antigravity_hooks;
+mod antigravity_logs;
 mod approvals;
 mod bus;
 mod codex_logs;
@@ -70,8 +72,11 @@ fn monitor_key(monitor: &tauri::Monitor) -> String {
 }
 
 impl HitArea {
-    fn contains(&self, x: f64, y: f64) -> bool {
-        x >= self.x && y >= self.y && x < self.x + self.width && y < self.y + self.height
+    fn contains_with_margin(&self, x: f64, y: f64, margin: f64) -> bool {
+        x >= self.x - margin
+            && y >= self.y - margin
+            && x < self.x + self.width + margin
+            && y < self.y + self.height + margin
     }
 }
 
@@ -148,6 +153,16 @@ fn dismiss_permission(
     nonce: String,
 ) -> Result<(), String> {
     state.approvals.dismiss(&event_id, &nonce)
+}
+
+#[tauri::command]
+fn get_antigravity_hooks_enabled(app: tauri::AppHandle) -> Result<bool, String> {
+    antigravity_hooks::is_enabled(&app)
+}
+
+#[tauri::command]
+fn set_antigravity_hooks_enabled(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    antigravity_hooks::set_enabled(&app, enabled)
 }
 
 fn place_on_work_area(
@@ -426,20 +441,23 @@ fn start_cursor_poll(window: WebviewWindow) {
     let app = window.app_handle().clone();
     thread::spawn(move || {
         let mut last_ignore = None;
+        let mut inside = false;
         loop {
             let current_state = app.state::<AppState>();
             let area = current_state.hit_area.lock().ok().and_then(|area| *area);
-            let inside = area
+            let margin = if inside { 8.0 } else { 4.0 };
+            let next_inside = area
                 .and_then(|area| {
                     let cursor = global_cursor_position()?;
                     let origin = window.outer_position().ok()?;
                     let scale = window.scale_factor().ok()?;
                     let local_x = (cursor.0 - f64::from(origin.x)) / scale;
                     let local_y = (cursor.1 - f64::from(origin.y)) / scale;
-                    Some(area.contains(local_x, local_y))
+                    Some(area.contains_with_margin(local_x, local_y, margin))
                 })
                 .unwrap_or(false);
-            let ignore = !inside;
+            inside = next_inside;
+            let ignore = !next_inside;
             if last_ignore != Some(ignore) {
                 if let Err(error) = window.set_ignore_cursor_events(ignore) {
                     eprintln!("Could not update overlay click-through state: {error}");
@@ -762,6 +780,8 @@ pub fn run() {
             open_whatsapp,
             respond_permission,
             dismiss_permission,
+            get_antigravity_hooks_enabled,
+            set_antigravity_hooks_enabled,
             list_monitors,
             set_placement,
             set_auto_start,
@@ -797,6 +817,7 @@ pub fn run() {
                 app.state::<AppState>().system_panel_open.clone(),
             );
             codex_logs::start(app.handle().clone());
+            antigravity_logs::start(app.handle().clone());
             win_notifications::start(app.handle().clone());
             match app.path().app_local_data_dir() {
                 Ok(directory) => {
@@ -863,10 +884,25 @@ mod tests {
             height: 30.0,
         };
 
-        assert!(area.contains(10.0, 20.0));
-        assert!(area.contains(49.9, 49.9));
-        assert!(!area.contains(50.0, 50.0));
-        assert!(!area.contains(9.9, 20.0));
+        assert!(area.contains_with_margin(10.0, 20.0, 0.0));
+        assert!(area.contains_with_margin(49.9, 49.9, 0.0));
+        assert!(!area.contains_with_margin(50.0, 50.0, 0.0));
+        assert!(!area.contains_with_margin(9.9, 20.0, 0.0));
+    }
+
+    #[test]
+    fn hit_area_margin_supports_distinct_enter_and_leave_hysteresis() {
+        let area = HitArea {
+            x: 10.0,
+            y: 20.0,
+            width: 40.0,
+            height: 30.0,
+        };
+
+        assert!(area.contains_with_margin(6.5, 25.0, 4.0));
+        assert!(!area.contains_with_margin(5.5, 25.0, 4.0));
+        assert!(area.contains_with_margin(2.5, 25.0, 8.0));
+        assert!(!area.contains_with_margin(1.5, 25.0, 8.0));
     }
 
     #[test]

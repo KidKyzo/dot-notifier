@@ -1,1 +1,18 @@
-{}
+{
+  "dot-notifier-agent-status": {
+    "PreInvocation": [
+      {
+        "command": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"d:\\Dokumen Kampus - Ariel\\Project\\Dotfication\\scripts\\antigravity-notify.ps1\" -Agent auto -Event PreInvocation",
+        "timeout": 2,
+        "type": "command"
+      }
+    ],
+    "Stop": [
+      {
+        "command": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"d:\\Dokumen Kampus - Ariel\\Project\\Dotfication\\scripts\\antigravity-notify.ps1\" -Agent auto -Event Stop",
+        "timeout": 2,
+        "type": "command"
+      }
+    ]
+  }
+}

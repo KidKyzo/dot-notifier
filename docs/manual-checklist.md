@@ -2,6 +2,12 @@
 
 - [ ] Verify clicks pass through the transparent window outside the dots and expanded panel.
 - [ ] Verify hovering the dots still expands the overlay after click-through is enabled.
+- [ ] Verify hover remains stable through 50 consecutive morphs at the selected display's native refresh rate.
+- [ ] Verify the morph stays crisp at 100%, 125%, 150%, and 200% Windows scaling; include mixed-DPI monitors.
+- [ ] Compare 60 Hz, 120 Hz, and 144 Hz displays using the motion lab's matching refresh target; record frame timings and display details in `docs/motion.md`.
+- [ ] Verify reduced-motion changes snap an in-progress morph to its target and remove pulses.
+- [ ] On a remote desktop or GPU-disabled session, verify the overlay remains usable and record whether the spring should fall back to crossfades.
+- [ ] Measure native idle CPU/RAM and active morph CPU/RAM; record whether idle stays below 1% CPU and 80 MB RAM.
 - [ ] Verify the overlay stays within the primary monitor work area above the taskbar.
 - [ ] Verify the tray menu can pause notifications, enable quiet mode, open the overlay, and quit.
 - [ ] Verify launch shows no taskbar button or Alt+Tab entry; verify `--hidden` starts without showing the overlay.
@@ -20,5 +26,6 @@
 - [ ] Verify token and quota values appear for task events that expose usage, and missing values stay hidden.
 - [ ] Verify incoming Windows toast notifications from monitored apps (e.g. WhatsApp, Telegram) appear in the Notifications dot.
 - [ ] Verify a trusted Codex `PermissionRequest` shows Approve, Reject, and Dismiss in the pill; only an explicit button click returns a decision, while timeout, dismissal, and hook exit fall through.
+- [ ] Enable Antigravity hooks in Settings and verify CLI and IDE `PreInvocation`/`Stop` events show running, completed, and failed states; confirm the hook returns `{}`, conversation IDs upsert, existing hook entries survive enable/disable, and transcript contents never appear in the overlay or logs.
 - [ ] Enable Now Playing and verify title, artist, artwork, playback state, and controls for Spotify and Apple Music; then opt into browser media and verify a YouTube Music tab in Chrome/Edge. Confirm browser media is excluded when the opt-in is off.
 - [ ] Enable WhatsApp style cards and verify sender initials, single-line message preview, incoming call detection, and the Open WhatsApp action with real Windows notifications.

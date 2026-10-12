@@ -38,4 +38,34 @@ if ($null -ne $notificationPayload) {
     }
 }
 
+
+# Forward supported Codex notifications to AI Task Board while preserving Dotfication above.
+$trackerNotification = $null
+foreach ($candidate in $NotificationArguments) {
+    if ($candidate -notmatch '^\s*\{') { continue }
+    try {
+        $parsed = ConvertFrom-Json -InputObject $candidate -ErrorAction Stop
+        $isCompleted = $parsed.type -eq "agent-turn-complete"
+        $isPermissionRequest = $parsed.hook_event_name -eq "PermissionRequest"
+        $isApproval = [string]$parsed.type -match 'approval|permission|blocked'
+        if ($isCompleted -or $isPermissionRequest -or $isApproval) {
+            $trackerNotification = $candidate
+            break
+        }
+    } catch {
+        continue
+    }
+}
+
+if ($null -ne $trackerNotification) {
+    $trackerScript = "D:\Dokumen Kampus - Ariel\Project\Agent Task Tracker\integrations\codex-notify\notify.mjs"
+    try {
+        $trackerNotification | & node $trackerScript
+        if ($LASTEXITCODE -ne 0) {
+            [Console]::Error.WriteLine("Task Board notifier exited with code $LASTEXITCODE.")
+        }
+    } catch {
+        [Console]::Error.WriteLine("Task Board notifier failed: $($_.Exception.Message)")
+    }
+}
 exit 0

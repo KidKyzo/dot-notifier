@@ -2,7 +2,7 @@ export type DemoStatus = "idle" | "running" | "done" | "error" | "needs_input";
 
 export type DemoTask = {
   id: string;
-  source: "codex";
+  source: "codex" | "antigravity-cli" | "antigravity-ide";
   name: string;
   status: DemoStatus;
   title: string;
@@ -42,17 +42,17 @@ export const emptyTasks: DemoTask[] = [
     source: "codex",
     name: "Codex",
     status: "idle",
-    title: "Tidak ada task aktif",
+    title: "No active task",
     progress: 0,
   },
 ];
 
 export const initialMessages: DemoMessage[] = [
-  { id: "mock-dimas", receivedAt: Date.now(), createdAt: Date.now(), sender: "Dimas", body: "PR-nya sudah saya approve.", unread: false },
+  { id: "mock-dimas", receivedAt: Date.now(), createdAt: Date.now(), sender: "Dimas", body: "I approved the pull request.", unread: false },
 ];
 
 export const incomingMessages: Array<Pick<DemoMessage, "sender" | "body">> = [
-  { sender: "Rina", body: "Jadi meeting jam 3 atau jam 4?" },
-  { sender: "Budi", body: "Server staging sudah naik." },
-  { sender: "Sari", body: "Foto tadi sudah saya kirim ya." },
+  { sender: "Rina", body: "Is the meeting at 3 or 4?" },
+  { sender: "Budi", body: "The staging server is up." },
+  { sender: "Sari", body: "I sent the photo from earlier." },
 ];
