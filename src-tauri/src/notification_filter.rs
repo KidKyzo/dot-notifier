@@ -157,12 +157,11 @@ impl NotificationFilter {
         let now = Instant::now();
         self.seen_notifications
             .retain(|_, seen| now.duration_since(seen.seen_at) < DEDUP_RETENTION);
-        if self
-            .seen_notifications
-            .get(&key)
-            .is_some_and(|seen| seen.content_hash == content_hash)
-        {
-            return false;
+        if let Some(seen) = self.seen_notifications.get_mut(&key) {
+            if seen.content_hash == content_hash {
+                seen.seen_at = now;
+                return false;
+            }
         }
 
         if self.seen_notifications.len() >= MAX_DEDUP_ENTRIES {
@@ -212,9 +211,10 @@ fn parse_config(contents: &str) -> Option<FilterConfig> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_config, FilterConfig, NotificationFilter};
+    use super::{parse_config, FilterConfig, NotificationFilter, DEDUP_RETENTION};
     use crate::bus::Event;
     use serde_json::json;
+    use std::time::{Duration, Instant};
 
     fn event(source: &str, app: Option<&str>, notification_id: Option<&str>) -> Event {
         let mut meta = serde_json::Map::new();
@@ -296,6 +296,27 @@ mod tests {
         assert!(filter.should_forward(&event("chat", Some("WhatsApp"), Some("43"))));
         assert!(filter.should_forward(&event("chat", Some("Telegram"), Some("42"))));
         assert!(filter.should_forward(&event("chat", Some("WhatsApp"), None)));
+    }
+
+    #[test]
+    fn a_toast_still_in_action_center_keeps_its_dedupe_entry_fresh() {
+        let mut filter = NotificationFilter::from_config(FilterConfig::default());
+        let toast = event("chat", Some("WhatsApp"), Some("42"));
+        assert!(filter.should_forward(&toast));
+        let seen = filter
+            .seen_notifications
+            .values_mut()
+            .next()
+            .expect("entry exists");
+        seen.seen_at = Instant::now() - DEDUP_RETENTION + Duration::from_secs(1);
+
+        assert!(!filter.should_forward(&toast));
+        let refreshed = filter
+            .seen_notifications
+            .values()
+            .next()
+            .expect("entry exists");
+        assert!(Instant::now().duration_since(refreshed.seen_at) < Duration::from_secs(1));
     }
 
     #[test]

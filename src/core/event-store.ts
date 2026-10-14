@@ -1,7 +1,7 @@
 export type AppEvent = {
   id: string;
   source: "ai" | "chat" | "system";
-  agent?: "codex" | "antigravity-cli" | "antigravity-ide" | "omp";
+  agent?: "codex" | "antigravity-app" | "antigravity-cli" | "antigravity-ide" | "omp";
   sessionId?: string;
   kind: "task" | "message" | "metric";
   status?: "running" | "done" | "error" | "needs_input" | "unread" | "warn" | "crit";
@@ -19,6 +19,17 @@ export type AppEvent = {
 
 export const CHAT_RETENTION_MS = 60 * 60 * 1000;
 export const AGENT_PEEK_WINDOW_MS = 1_500;
+const WINDOWS_EPOCH_MS = 11_644_473_600_000;
+
+export const eventCreatedAtMs = (event: AppEvent, fallback: number): number => {
+  const isoTime = event.startedAt ? Date.parse(event.startedAt) : Number.NaN;
+  if (Number.isFinite(isoTime)) return isoTime;
+  const ticks = event.meta?.createdAtTicks;
+  if (typeof ticks === "number" && Number.isFinite(ticks)) {
+    return Math.trunc(ticks / 10_000) - WINDOWS_EPOCH_MS;
+  }
+  return fallback;
+};
 
 const priority = (event: AppEvent) => {
   if (event.status === "error" || event.status === "needs_input" || event.status === "crit") return 0;
@@ -46,20 +57,17 @@ export class EventStore {
   upsert(event: AppEvent, receivedAt = Date.now()): void {
     const key = eventKey(event);
     this.events.set(key, event);
-    if (event.source === "ai" && event.kind === "task") {
-      if (event.status === undefined || event.status === "running") this.queuedAt.delete(key);
-      else this.queuedAt.set(key, receivedAt);
-    }
     if (event.source === "chat" && event.kind === "message") {
       this.observedAt.set(key, receivedAt);
-      const createdAt = event.startedAt ? Date.parse(event.startedAt) : Number.NaN;
-      this.messageTimes.set(key, Number.isFinite(createdAt) ? createdAt : receivedAt);
+      this.messageTimes.set(key, eventCreatedAtMs(event, receivedAt));
     }
     if (event.status === undefined || event.status === "running") {
       this.pending.delete(key);
       this.order.delete(key);
+      this.queuedAt.delete(key);
       return;
     }
+    this.queuedAt.set(key, receivedAt);
     if (isUnreadChatMessage(event) || !this.order.has(key)) {
       this.order.set(key, this.sequence++);
     }
@@ -82,7 +90,7 @@ export class EventStore {
       if (!ids.includes(event.id)) continue;
       this.pending.delete(key);
       this.order.delete(key);
-      if (event.source === "ai" && event.kind === "task") this.queuedAt.delete(key);
+      this.queuedAt.delete(key);
     }
     return this.nextPeek();
   }
@@ -96,23 +104,34 @@ export class EventStore {
     )[0];
   }
 
-  nextPeekGroup(windowMs = AGENT_PEEK_WINDOW_MS): AppEvent[] {
+  nextPeekGroup(windowMs = AGENT_PEEK_WINDOW_MS, activeIds: string[] = [], arrivingId?: string): AppEvent[] {
     const first = this.nextPeek();
     if (!first) return [];
-    if (first.source !== "ai" || first.kind !== "task") return [first];
-    if (first.actions?.length) return [first];
+    if (first.actions?.length || activeIds.some((id) =>
+      [...this.pending.values()].some((event) => event.id === id && event.actions?.length))) return [first];
+
+    const pending = [...this.pending.values()];
+    const sortGroup = (events: AppEvent[]) => events.sort((left, right) =>
+      priority(left) - priority(right)
+      || (isUnreadChatMessage(left) && isUnreadChatMessage(right)
+        ? this.compareChatMessages(left, right)
+        : (this.order.get(eventKey(left)) ?? 0) - (this.order.get(eventKey(right)) ?? 0)));
+
+    if (activeIds.length > 0 && arrivingId) {
+      if (!pending.some((event) => event.id === arrivingId)) return [];
+      const active = new Set([...activeIds, arrivingId]);
+      return sortGroup(pending.filter((event) => active.has(event.id) && !event.actions?.length));
+    }
 
     const firstTime = this.queuedAt.get(eventKey(first));
     if (firstTime === undefined) return [first];
 
-    return [...this.pending.values()]
+    return sortGroup(pending
       .filter((event) => {
-        if (event.source !== "ai" || event.kind !== "task" || event.actions?.length) return false;
+        if (event.actions?.length) return false;
         const observedAt = this.queuedAt.get(eventKey(event));
         return observedAt !== undefined && Math.abs(observedAt - firstTime) <= windowMs;
-      })
-      .sort((left, right) => priority(left) - priority(right)
-        || (this.order.get(eventKey(left)) ?? 0) - (this.order.get(eventKey(right)) ?? 0));
+      }));
   }
 
   dismissPeek(): AppEvent | undefined {
@@ -121,7 +140,7 @@ export class EventStore {
       const key = eventKey(current);
       this.pending.delete(key);
       this.order.delete(key);
-      if (current.source === "ai" && current.kind === "task") this.queuedAt.delete(key);
+      this.queuedAt.delete(key);
     }
     return this.nextPeek();
   }

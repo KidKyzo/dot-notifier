@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("auto", "antigravity-cli", "antigravity-ide")]
+    [ValidateSet("auto", "antigravity-app", "antigravity-cli", "antigravity-ide")]
     [string]$Agent = "auto",
     [ValidateSet("PreInvocation", "Stop")]
     [string]$Event = "Stop",
@@ -60,7 +60,7 @@ try {
         } elseif ($transcriptPath -match '(?i)(?:^|[\\/])antigravity-ide[\\/]brain[\\/]') {
             $resolvedAgent = "antigravity-ide"
         } elseif ($transcriptPath -match '(?i)(?:^|[\\/])antigravity[\\/]brain[\\/]') {
-            $resolvedAgent = "antigravity-ide"
+            $resolvedAgent = "antigravity-app"
         } else {
             exit 0
         }
@@ -76,7 +76,11 @@ try {
         "running"
     }
 
-    $agentName = if ($resolvedAgent -eq "antigravity-cli") { "CLI" } else { "IDE" }
+    $agentName = switch ($resolvedAgent) {
+        "antigravity-cli" { "CLI" }
+        "antigravity-app" { "App" }
+        default { "IDE" }
+    }
     $title = switch ($status) {
         "running" { "Antigravity $agentName task running" }
         "done" { "Antigravity $agentName task completed" }

@@ -10,7 +10,7 @@ System metrics use the same envelope with `source: "system"` and
 | --- | --- | --- | --- |
 | `id` | string | yes | UUID; identifies this snapshot |
 | `source` | enum | yes | `ai`, `chat`, or `system` |
-| `agent` | enum | no | `codex`, `antigravity-cli`, `antigravity-ide`, or `omp` |
+| `agent` | enum | no | `codex`, `antigravity-app`, `antigravity-cli`, `antigravity-ide`, or `omp` |
 | `sessionId` | string | no | Non-empty agent session or conversation id |
 | `kind` | enum | yes | `task`, `message`, or `metric` |
 | `status` | enum | task/message: yes; metric: no | `running`, `done`, `error`, `needs_input`, `unread`, `warn`, or `crit` |
@@ -110,7 +110,7 @@ command = 'powershell -NoProfile -ExecutionPolicy Bypass -File "C:\\path\\to\\Do
 The hook only reports that Codex is waiting. Open Codex to inspect and answer
 the permission prompt there.
 
-Antigravity CLI and IDE task status is opt-in from Settings. Enabling it copies
+Antigravity app, CLI, and IDE task status is opt-in from Settings. Enabling it copies
 `scripts/antigravity-notify.ps1` into Dot Notifier's local data directory and
 adds the `dot-notifier-agent-status` entry to the user's
 `~/.gemini/config/hooks.json`, preserving other hooks and backing up an
@@ -122,7 +122,7 @@ stdout and sends a minimal status event in a detached process, so hook output
 never allows or denies an Antigravity action. It sends `running` at invocation,
 and maps `Stop` to `done`, `error`, or `running` according to `fullyIdle` and
 whether an error occurred. The event uses `conversationId` for both `id` and
-`sessionId`, and identifies CLI versus IDE from the documented transcript path.
+`sessionId`, and identifies the app, CLI, or IDE from the documented transcript path.
 If `conversationId` is absent, the UUID can be recovered from that path. The
 adapter never opens `transcript.jsonl` or forwards error details, workspace
 paths, or conversation content. The delivered event upserts by agent and
@@ -131,7 +131,7 @@ conversation ID.
 The official Antigravity hook contract is documented at
 <https://antigravity.google/docs/hooks>. The installed `agy` version and IDE
 runtime still require manual verification; see `docs/spikes/antigravity-cli.md`
-and `docs/spikes/antigravity-ide.md`.
+`docs/spikes/antigravity-ide.md` and `docs/spikes/antigravity-app.md`.
 
 The protocol and schema version must be reviewed together before changing
 either one.

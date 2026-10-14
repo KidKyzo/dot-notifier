@@ -299,6 +299,42 @@ fn set_auto_start(enabled: bool) -> Result<(), String> {
     }
 }
 
+fn auto_start_command_matches(registry_output: &str, executable: &str) -> bool {
+    let expected = format!("\"{executable}\" --hidden");
+    registry_output.lines().any(|line| {
+        line.split_once("REG_SZ")
+            .is_some_and(|(_, command)| command.trim().eq_ignore_ascii_case(&expected))
+    })
+}
+
+#[tauri::command]
+fn get_auto_start() -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+        let output = Command::new("reg.exe")
+            .args([
+                "query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "DotNotifier",
+            ])
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Ok(false);
+        }
+        Ok(auto_start_command_matches(
+            &String::from_utf8_lossy(&output.stdout),
+            &executable.to_string_lossy(),
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Auto-start is available on Windows only".into())
+    }
+}
+
 #[tauri::command]
 fn update_tray_status(
     state: tauri::State<'_, AppState>,
@@ -785,6 +821,7 @@ pub fn run() {
             list_monitors,
             set_placement,
             set_auto_start,
+            get_auto_start,
             set_monitored_apps,
             is_quiet_environment,
             set_allow_during_fullscreen,
@@ -865,7 +902,24 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{position_for, tray_icon_size, Corner, HitArea};
+    use super::{auto_start_command_matches, position_for, tray_icon_size, Corner, HitArea};
+
+    #[test]
+    fn auto_start_rejects_stale_or_unhidden_registry_commands() {
+        let executable = r"D:\Dot Notifier\dot-notifier.exe";
+        assert!(auto_start_command_matches(
+            "DotNotifier    REG_SZ    \"D:\\Dot Notifier\\dot-notifier.exe\" --hidden",
+            executable,
+        ));
+        assert!(!auto_start_command_matches(
+            "DotNotifier    REG_SZ    \"C:\\Program Files\\Dot Notifier\\dot-notifier.exe\"",
+            executable,
+        ));
+        assert!(!auto_start_command_matches(
+            "DotNotifier    REG_SZ    \"D:\\Dot Notifier\\dot-notifier.exe\"",
+            executable,
+        ));
+    }
 
     #[test]
     fn tray_icon_size_tracks_common_windows_dpi_scales() {

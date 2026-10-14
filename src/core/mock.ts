@@ -2,7 +2,7 @@ export type DemoStatus = "idle" | "running" | "done" | "error" | "needs_input";
 
 export type DemoTask = {
   id: string;
-  source: "codex" | "antigravity-cli" | "antigravity-ide";
+  source: "codex" | "antigravity-app" | "antigravity-cli" | "antigravity-ide";
   name: string;
   status: DemoStatus;
   title: string;

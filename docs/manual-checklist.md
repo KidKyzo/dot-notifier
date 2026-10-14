@@ -1,7 +1,7 @@
 # Manual Windows checklist
 
-- [ ] Verify clicks pass through the transparent window outside the dots and expanded panel.
-- [ ] Verify hovering the dots still expands the overlay after click-through is enabled.
+- [done] Verify clicks pass through the transparent window outside the dots and expanded panel.
+- [done] Verify hovering the dots still expands the overlay after click-through is enabled.
 - [ ] Verify hover remains stable through 50 consecutive morphs at the selected display's native refresh rate.
 - [ ] Verify the morph stays crisp at 100%, 125%, 150%, and 200% Windows scaling; include mixed-DPI monitors.
 - [ ] Compare 60 Hz, 120 Hz, and 144 Hz displays using the motion lab's matching refresh target; record frame timings and display details in `docs/motion.md`.
@@ -27,5 +27,7 @@
 - [ ] Verify incoming Windows toast notifications from monitored apps (e.g. WhatsApp, Telegram) appear in the Notifications dot.
 - [ ] Verify a trusted Codex `PermissionRequest` shows Approve, Reject, and Dismiss in the pill; only an explicit button click returns a decision, while timeout, dismissal, and hook exit fall through.
 - [ ] Enable Antigravity hooks in Settings and verify CLI and IDE `PreInvocation`/`Stop` events show running, completed, and failed states; confirm the hook returns `{}`, conversation IDs upsert, existing hook entries survive enable/disable, and transcript contents never appear in the overlay or logs.
+- [ ] Run a live Antigravity 2.0 app task and verify its own running, completed, and failed rows appear without being labeled IDE; check hook delivery after enabling or refreshing the Settings integration.
+- [ ] Leave a WhatsApp toast in Action Center for over ten minutes, then receive a new one during an AI task peek. Verify the old toast does not re-peek, the new message leads, the mixed group shows both sources and the true count, and hovering reveals every message in the scrollable panel.
 - [ ] Enable Now Playing and verify title, artist, artwork, playback state, and controls for Spotify and Apple Music; then opt into browser media and verify a YouTube Music tab in Chrome/Edge. Confirm browser media is excluded when the opt-in is off.
 - [ ] Enable WhatsApp style cards and verify sender initials, single-line message preview, incoming call detection, and the Open WhatsApp action with real Windows notifications.

@@ -58,7 +58,7 @@ impl Event {
                 self.agent.as_deref().is_none_or(|agent| {
                     matches!(
                         agent,
-                        "codex" | "antigravity-cli" | "antigravity-ide" | "omp"
+                        "codex" | "antigravity-app" | "antigravity-cli" | "antigravity-ide" | "omp"
                     )
                 }) && self
                     .session_id
@@ -538,6 +538,9 @@ mod tests {
         assert_eq!(parsed.agent.as_deref(), Some("codex"));
         assert_eq!(parsed.session_id.as_deref(), Some("thread-123"));
         assert!(parse_event(&payload.replace("codex", "unknown-agent")).is_none());
+        let app = parse_event(&payload.replace("codex", "antigravity-app"))
+            .expect("Antigravity app task is supported");
+        assert_eq!(app.agent.as_deref(), Some("antigravity-app"));
     }
 
     #[test]

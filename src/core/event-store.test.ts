@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventStore, type AppEvent } from "./event-store";
 
 const event = (id: string, status: AppEvent["status"], title = id): AppEvent => ({
@@ -12,6 +12,7 @@ const event = (id: string, status: AppEvent["status"], title = id): AppEvent => 
 });
 
 describe("event store", () => {
+  afterEach(() => vi.useRealTimers());
   it("falls back to id when an AI snapshot has no session identity", () => {
     const store = new EventStore();
     store.upsert({ id: "fallback-id", source: "ai", kind: "task", status: "running", title: "Old" });
@@ -33,6 +34,13 @@ describe("event store", () => {
       title: "Latest snapshot",
     });
     expect(store.nextPeek()?.id).toBe("second-id");
+  });
+
+  it("keeps Antigravity app and IDE sessions distinct", () => {
+    const store = new EventStore();
+    store.upsert({ ...event("app", "running"), agent: "antigravity-app", sessionId: "conversation" });
+    store.upsert({ ...event("ide", "done"), agent: "antigravity-ide", sessionId: "conversation" });
+    expect(store.all().map(({ agent }) => agent)).toEqual(["antigravity-app", "antigravity-ide"]);
   });
 
   it("updates a session snapshot and prioritizes errors and needs-input peeks", () => {
@@ -99,6 +107,29 @@ describe("event store", () => {
     expect(store.nextPeek()?.id).toBe("newer");
   });
 
+  it("uses Windows creation ticks so an older WhatsApp toast cannot replace a newer peek", () => {
+    const store = new EventStore();
+    store.upsert({
+      id: "newer",
+      source: "chat",
+      kind: "message",
+      status: "unread",
+      title: "Newer",
+      meta: { createdAtTicks: 638_960_000_020_000_000 },
+    }, 2_000);
+    store.upsert({
+      id: "older",
+      source: "chat",
+      kind: "message",
+      status: "unread",
+      title: "Older",
+      meta: { createdAtTicks: 638_960_000_010_000_000 },
+    }, 3_000);
+
+    expect(store.nextPeek()?.id).toBe("newer");
+    expect(store.pendingChatMessages().map(({ id }) => id)).toEqual(["newer", "older"]);
+  });
+
   it("groups the newest queued chat notifications into one peek", () => {
     const store = new EventStore();
     for (const id of ["first", "second", "third", "fourth"]) {
@@ -108,6 +139,52 @@ describe("event store", () => {
     expect(store.pendingChatMessages(3).map(({ id }) => id)).toEqual(["fourth", "third", "second"]);
     expect(store.dismissPeekGroup(["fourth", "third", "second"])?.id).toBe("first");
     expect(store.all()).toHaveLength(4);
+  });
+
+  it("coalesces AI and WhatsApp arrivals inside the window and keeps later events separate", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const store = new EventStore();
+    store.upsert(event("ai-done", "done"), Date.now());
+    vi.advanceTimersByTime(1_000);
+    store.upsert({ id: "chat", source: "chat", kind: "message", status: "unread", title: "Rina" }, Date.now());
+    expect(store.nextPeekGroup().map(({ id }) => id)).toEqual(["chat", "ai-done"]);
+
+    vi.advanceTimersByTime(2_000);
+    store.upsert(event("later", "done"), Date.now());
+    expect(store.nextPeekGroup().map(({ id }) => id)).toEqual(["chat", "ai-done"]);
+    store.dismissPeekGroup(["chat", "ai-done"]);
+    expect(store.nextPeekGroup().map(({ id }) => id)).toEqual(["later"]);
+  });
+
+  it("joins a new WhatsApp event with an active AI peek even after the window", () => {
+    const store = new EventStore();
+    store.upsert(event("ai-done", "done"), 1_000);
+    store.upsert({ id: "chat", source: "chat", kind: "message", status: "unread", title: "Rina" }, 10_000);
+    expect(store.nextPeekGroup(1_500, ["ai-done"], "chat").map(({ id }) => id)).toEqual(["chat", "ai-done"]);
+  });
+
+  it("puts a non-action needs-input task first in a mixed burst", () => {
+    const store = new EventStore();
+    store.upsert({ id: "chat", source: "chat", kind: "message", status: "unread", title: "Rina" }, 1_000);
+    store.upsert(event("waiting", "needs_input"), 1_100);
+    expect(store.nextPeekGroup().map(({ id }) => id)).toEqual(["waiting", "chat"]);
+  });
+
+  it("keeps actionable approval requests out of a mixed burst", () => {
+    const store = new EventStore();
+    store.upsert({ ...event("approval", "needs_input"), actions: ["approve", "reject"], actionNonce: "nonce" }, 1_000);
+    store.upsert({ id: "chat", source: "chat", kind: "message", status: "unread", title: "Rina" }, 1_100);
+    expect(store.nextPeekGroup().map(({ id }) => id)).toEqual(["approval"]);
+  });
+
+  it("accounts for a burst of ten without discarding queued events", () => {
+    const store = new EventStore();
+    for (let index = 0; index < 10; index += 1) {
+      store.upsert({ id: `chat-${index}`, source: "chat", kind: "message", status: "unread", title: "WhatsApp" }, 1_000 + index);
+    }
+    expect(store.nextPeekGroup()).toHaveLength(10);
+    expect(store.all()).toHaveLength(10);
   });
 
   it("expires chat events after one hour and removes them from the peek queue", () => {

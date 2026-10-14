@@ -30,4 +30,10 @@ describe("chat message retention", () => {
     expect(upsertChatMessage([newest], olderDeliveredLate).map(({ id }) => id))
       .toEqual(["newest", "older"]);
   });
+
+  it("keeps every delivered notification available in the expanded panel", () => {
+    const messages = Array.from({ length: 12 }, (_, index) => message(`toast-${index}`, index));
+    const retained = messages.reduce<DemoMessage[]>((current, next) => upsertChatMessage(current, next), []);
+    expect(retained).toHaveLength(12);
+  });
 });

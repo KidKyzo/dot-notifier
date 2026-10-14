@@ -11,12 +11,12 @@ Status: lab scaffolded and browser baseline captured; native-app measurements pe
 
 - The HUD begins at 64 × 24 px. A normal peek uses 300 × 44 px; expanded uses 320 px wide and the measured panel content height. Approval, chat, and call peeks can be taller.
 - The shell uses a 550 ms `cubic-bezier(0.32, 0.72, 0, 1)` transition for width, height, and radius. Content fades over 300 ms after a 140 ms delay. Dot status colors transition over 300 ms.
-- The native Tauri window is fixed at 380 × 500 px, transparent, and has no native shadow. The UI shell uses a translucent dark fill, 26 px CSS backdrop blur, an inset highlight, and a shadow.
+- The native Tauri window is fixed at 380 × 500 px, transparent, and has no native shadow. The UI shell uses a translucent dark fill, 26 px CSS backdrop blur, an inset highlight, and a fine outline.
 - Existing CSS shape changes use the same HUD element, so the simulated glass pill follows the shell's width, height, and radius morph.
 
 ### Rendering decision
 
-Use CSS-simulated glass in the morphing shell. Keep the pill shape attached to the animated shell; retain a readable semi-opaque base, inner highlight, and layered shadow. Do not add a native Acrylic/Mica backdrop or animation dependency for M0. The current browser preview can demonstrate CSS blur over its own wallpaper background, but that does not verify blur of the desktop behind a transparent WebView2 window.
+Use CSS-simulated glass in the morphing shell. Keep the pill shape attached to the animated shell; retain a readable semi-opaque base, inner highlight, and fine outline. Do not add a native Acrylic/Mica backdrop or animation dependency for M0. The current browser preview can demonstrate CSS blur over its own wallpaper background, but that does not verify blur of the desktop behind a transparent WebView2 window.
 
 ### Motion lab
 
@@ -45,7 +45,7 @@ Captured 2026-10-12 in the Codex in-app browser at its default viewport, using t
 
 - Inspected the lab shell over synthetic bright, dark, and busy backgrounds. Its rounded shell and simulated glass surface remain one shape as it changes from dot to pill to panel.
 - No visible glitch was recorded in the browser preview. The in-app browser displays the lab inside an opaque page, so this does not establish how blur or contrast behaves over real desktop wallpaper in WebView2.
-- Remaining native visual review: bright, dark, and busy real wallpapers in both app themes; inspect for edge flicker, text contrast, shadow artifacts, or blur changes during morph.
+- Remaining native visual review: bright, dark, and busy real wallpapers in both app themes; inspect for edge flicker, text contrast, or blur changes during morph.
 
 ### Open measurement items
 
@@ -82,8 +82,8 @@ Native manual verification still needed: click-through and hover hit-testing, DP
 
 Status: CSS material pass implemented; native wallpaper and contrast review remains pending.
 
-- Kept the simulated glass surface on the morphing shell. The shell now has a restrained top sheen, inner highlight, fine outline, and layered static shadow; blur and shadow are not animated during morphs.
-- Added system light/dark material tokens for shell fill, text, outlines, nested cards, controls, hover surfaces, ring tracks, and shadows. Status colors remain distinct in both palettes.
+- Kept the simulated glass surface on the morphing shell. The shell has a restrained top sheen, inner highlight, and fine outline; blur is not animated during morphs. The outer CSS shadow was removed after native review.
+- Added system light/dark material tokens for shell fill, text, outlines, nested cards, controls, hover surfaces, and ring tracks. Status colors remain distinct in both palettes.
 - Added a subtle status-colored dot glow and refined the mock motion lab glass to match the app shell. Segoe UI Variable remains the preferred system font, with existing tabular numerals and truncation retained.
 - The CSS theme follows `prefers-color-scheme`; there is no separate in-app theme setting. The lab's synthetic wallpaper choices remain available for contrast review.
 

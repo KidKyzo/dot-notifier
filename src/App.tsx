@@ -3,7 +3,7 @@ import type { CSSProperties, KeyboardEvent, MouseEvent } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { islandReducer } from "./core/island-state";
-import { CHAT_RETENTION_MS, EventStore, type AppEvent } from "./core/event-store";
+import { CHAT_RETENTION_MS, EventStore, eventCreatedAtMs, type AppEvent } from "./core/event-store";
 import { pruneExpiredMessages, upsertChatMessage } from "./core/chat-retention";
 import {
   aggregateTaskStatus,
@@ -36,7 +36,7 @@ import "./App.css";
 
 type PulseSource = "ai" | "codex" | "chat" | "system";
 type DotStatus = DemoStatus | "warn" | "crit";
-type PeekInfo = { source: string; message: string; chatMessages: AppEvent[]; agentEvents?: AppEvent[]; agentEventIds?: string[]; agentOverflowCount?: number; actionEvent?: AppEvent; chatSender?: string; chatApp?: string; incomingCall?: boolean };
+type PeekInfo = { source: string; message: string; chatMessages: AppEvent[]; groupEvents?: AppEvent[]; groupEventIds?: string[]; overflowCount?: number; actionEvent?: AppEvent; chatSender?: string; chatApp?: string; incomingCall?: boolean };
 type MonitorOption = { key: string; label: string; width: number; height: number };
 type NowPlayingSnapshot = { title: string; artist: string; playing: boolean; coverDataUrl: string | null };
 type HudShape = { width: SpringAxis; height: SpringAxis; radius: SpringAxis; frame: number | null; lastFrame: number | null };
@@ -64,6 +64,15 @@ const percent = (value: number | null) => value === null ? systemCopy.unavailabl
 const initials = (name: string) => name.trim().split(/\s+/).slice(0, 2).map((part) => Array.from(part)[0] ?? "").join("").toUpperCase() || "?";
 
 const avatarHue = (name: string) => Array.from(name).reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) % 360, 0);
+const agentDisplayName = (agent?: AppEvent["agent"]): string => {
+  switch (agent) {
+    case "codex": return "Codex";
+    case "antigravity-app": return "Antigravity App";
+    case "antigravity-cli": return "Antigravity CLI";
+    case "antigravity-ide": return "Antigravity IDE";
+    default: return agent ?? "AI";
+  }
+};
 
 const metricUsage = (used: number | null, total: number | null, value: number | null) => {
   if (value === null) return systemCopy.unavailable;
@@ -156,6 +165,7 @@ function App() {
   const [quietEnvironment, setQuietEnvironment] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<UserSettings>(() => loadSettings(window.localStorage));
+  const [autoStartReady, setAutoStartReady] = useState(!isTauri());
   const [antigravityHooksEnabled, setAntigravityHooksEnabled] = useState(false);
   const [monitoredAppsText, setMonitoredAppsText] = useState(settings.monitoredApps.join(", "));
   const [notificationPermission, setNotificationPermission] = useState<boolean | null>(null);
@@ -163,6 +173,9 @@ function App() {
   const [nowPlaying, setNowPlaying] = useState<NowPlayingSnapshot | null>(null);
   const [nowPlayingTitleOverflows, setNowPlayingTitleOverflows] = useState(false);
   const eventStore = useRef(new EventStore());
+  const activePeekIds = useRef<string[]>([]);
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const hoverExpanded = useRef(false);
   const hoverLeaveTimer = useRef<number | null>(null);
   const collapseDelayTimer = useRef<number | null>(null);
@@ -197,11 +210,12 @@ function App() {
     }).catch((error: unknown) => console.warn("Could not update overlay hit area", error));
   }, []);
 
-  const showEventPeek = (next: AppEvent, groupedAgentEvents: AppEvent[] = [next]) => {
+  const showEventPeek = (next: AppEvent, groupedEvents: AppEvent[] = [next]) => {
     const chatSource = (typeof next.meta?.sender === "string" && next.meta.sender)
       || (typeof next.meta?.app === "string" && next.meta.app)
       || "Notification";
-    const chatMessages = next.source === "chat" ? eventStore.current.pendingChatMessages(3) : [];
+    const chatMessages = groupedEvents.filter((event) => event.source === "chat");
+    const chatApp = chatMessages.find((event) => typeof event.meta?.app === "string")?.meta?.app;
     const sender = (typeof next.meta?.sender === "string" && next.meta.sender)
       || (typeof next.meta?.app === "string" && next.meta.app)
       || next.title;
@@ -209,13 +223,7 @@ function App() {
     const incomingCall = cardEnabled && isIncomingWhatsAppCall(next);
     setPeekInfo({
       source: next.source === "ai"
-        ? (next.agent === "codex"
-          ? "Codex"
-          : next.agent === "antigravity-cli"
-          ? "Antigravity CLI"
-          : next.agent === "antigravity-ide"
-          ? "Antigravity IDE"
-          : next.agent ?? "AI")
+        ? agentDisplayName(next.agent)
       : next.source === "system"
         ? systemCopy.system
         : chatSource,
@@ -223,30 +231,39 @@ function App() {
         ? next.status === "crit" ? systemCopy.criticalAlert : systemCopy.warningAlert
         : (next.body || next.title),
       chatMessages,
-      ...(groupedAgentEvents.length > 1 ? {
-        agentEvents: groupedAgentEvents.slice(0, 5),
-        agentEventIds: groupedAgentEvents.map((event) => event.id),
-        agentOverflowCount: Math.max(0, groupedAgentEvents.length - 5),
+      ...(groupedEvents.length > 1 ? {
+        groupEvents: groupedEvents.slice(0, 5),
+        groupEventIds: groupedEvents.map((event) => event.id),
+        overflowCount: Math.max(0, groupedEvents.length - 5),
       } : {}),
-      ...(typeof next.meta?.app === "string" ? { chatApp: next.meta.app } : {}),
+      ...(typeof chatApp === "string" ? { chatApp } : {}),
       ...(cardEnabled && next.source === "chat" ? { chatSender: sender } : {}),
       ...(incomingCall ? { incomingCall: true } : {}),
       ...(next.actions && next.actionNonce ? { actionEvent: next } : {}),
     });
+    activePeekIds.current = groupedEvents.map((event) => event.id);
     setPulseSource(next.source === "ai" ? "ai" : next.source);
     dispatch({ type: "set", state: "alert" });
   };
 
-  const showNextQueuedPeek = () => {
+  const showNextQueuedPeek = (arrivingId?: string) => {
     if (quietEnvironmentRef.current || pausedRef.current || quietModeRef.current) return;
-    let next = eventStore.current.nextPeek();
-    while (next && !settingsRef.current.whatsappNotificationsEnabled && isWhatsAppNotification(next)) {
-      eventStore.current.dismissPeek();
-      next = eventStore.current.nextPeek();
+    if (stateRef.current === "expanded") return;
+    if (!settingsRef.current.whatsappNotificationsEnabled) {
+      const disabledIds = eventStore.current.pendingChatMessages(Number.POSITIVE_INFINITY)
+        .filter(isWhatsAppNotification)
+        .map((event) => event.id);
+      if (disabledIds.length > 0) eventStore.current.dismissPeekGroup(disabledIds);
     }
+    const next = eventStore.current.nextPeek();
     if (next) {
-      const groupedEvents = eventStore.current.nextPeekGroup();
-      showEventPeek(next, groupedEvents);
+      const groupedEvents = eventStore.current.nextPeekGroup(
+        undefined,
+        activePeekIds.current,
+        arrivingId,
+      );
+      if (groupedEvents.length === 0) return;
+      showEventPeek(groupedEvents[0], groupedEvents);
     }
   };
 
@@ -331,6 +348,8 @@ function App() {
         || (state !== "alert" && state !== "peek")) return;
     if (peekInfo.chatMessages.length > 0) {
       eventStore.current.dismissPeekGroup(peekInfo.chatMessages.map((message) => message.id));
+      activePeekIds.current = activePeekIds.current.filter((id) =>
+        !peekInfo.chatMessages.some((message) => message.id === id));
     }
     dispatch({ type: "dismiss" });
     setPulseSource(null);
@@ -350,6 +369,23 @@ function App() {
       console.warn("Could not save Dot Notifier settings", error);
     }
   }, [settings]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let active = true;
+    void invoke<boolean>("get_auto_start")
+      .then((enabled) => {
+        if (active) setSettings((current) => ({ ...current, autoStart: enabled }));
+      })
+      .catch((error: unknown) => {
+        console.warn("Could not read auto-start status", error);
+        if (active) setSettings((current) => ({ ...current, autoStart: false }));
+      })
+      .finally(() => {
+        if (active) setAutoStartReady(true);
+      });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -513,14 +549,14 @@ function App() {
         if (payload.status === undefined) return;
       }
       if (payload.source === "ai"
-          && (payload.agent === "codex" || payload.agent === "antigravity-cli" || payload.agent === "antigravity-ide")
+          && (payload.agent === "codex" || payload.agent === "antigravity-app" || payload.agent === "antigravity-cli" || payload.agent === "antigravity-ide")
           && payload.kind === "task"
           && (payload.status === "running" || payload.status === "done"
             || payload.status === "error" || payload.status === "needs_input")) {
         const task: DemoTask = {
           id: payload.id,
           source: payload.agent,
-          name: `${payload.agent === "codex" ? "Codex" : payload.agent === "antigravity-cli" ? "Antigravity CLI" : "Antigravity IDE"} · ${payload.id.slice(0, 8)}`,
+          name: `${agentDisplayName(payload.agent)} · ${payload.id.slice(0, 8)}`,
           status: payload.status,
           title: payload.title,
           ...(payload.body ? { detail: payload.body } : {}),
@@ -537,7 +573,6 @@ function App() {
       if (payload.source === "chat" && payload.kind === "message") {
         const receivedAt = Date.now();
         eventStore.current.upsert(payload, receivedAt);
-        const createdAt = payload.startedAt ? Date.parse(payload.startedAt) : Number.NaN;
         const sender = (typeof payload.meta?.sender === "string" && payload.meta.sender)
           || (typeof payload.meta?.app === "string" && payload.meta.app)
           || payload.title;
@@ -545,14 +580,14 @@ function App() {
         setMessages((current) => upsertChatMessage(current, {
           id: payload.id,
           receivedAt,
-          createdAt: Number.isFinite(createdAt) ? createdAt : receivedAt,
+          createdAt: eventCreatedAtMs(payload, receivedAt),
           sender,
           body,
           unread: true,
         }));
       }
 
-      showNextQueuedPeek();
+      showNextQueuedPeek(payload.id);
     }).then((stopListening) => {
       if (disposed) stopListening();
       else unlisten = stopListening;
@@ -576,27 +611,38 @@ function App() {
   }, [reportHitArea]);
 
   useEffect(() => {
+    if (state === "expanded" && activePeekIds.current.length > 0
+        && !peekInfo.actionEvent && !peekInfo.groupEvents?.some((event) => event.status === "needs_input")) {
+      eventStore.current.dismissPeekGroup(activePeekIds.current);
+      activePeekIds.current = [];
+    } else if (state === "idle") {
+      activePeekIds.current = [];
+    }
+  }, [state, peekInfo]);
+
+  useEffect(() => {
     if (state === "alert") {
       const timer = window.setTimeout(() => dispatch({ type: "set", state: "peek" }), 240);
       return () => window.clearTimeout(timer);
     }
 
-    if (state === "peek" && peekInfo.actionEvent) return;
+    if (state === "peek" && (peekInfo.actionEvent
+        || peekInfo.groupEvents?.some((event) => event.status === "needs_input"))) return;
 
     if (state === "peek") {
       const timer = window.setTimeout(() => {
-        const groupedIds = peekInfo.agentEventIds ?? (peekInfo.chatMessages.length > 1
-          ? peekInfo.chatMessages.map((event) => event.id)
-          : []);
-        if (groupedIds.length > 1) eventStore.current.dismissPeekGroup(groupedIds);
+        const groupedIds = peekInfo.groupEventIds ?? activePeekIds.current;
+        if (groupedIds.length > 0) eventStore.current.dismissPeekGroup(groupedIds);
         else eventStore.current.dismissPeek();
+        activePeekIds.current = [];
         if (eventStore.current.nextPeek()) {
           showNextQueuedPeek();
         } else {
           dispatch({ type: "dismiss" });
           setPulseSource(null);
         }
-      }, settings.peekDurationSeconds * 1000);
+      }, peekInfo.groupEvents ? Math.max(6_000, settings.peekDurationSeconds * 1000)
+        : settings.peekDurationSeconds * 1000);
       return () => window.clearTimeout(timer);
     }
   }, [state, settings.peekDurationSeconds, peekInfo]);
@@ -631,10 +677,10 @@ function App() {
     let radius: number = motionTokens.geometry.idle.radius;
     if (state === "peek") {
       width = motionTokens.geometry.peek.width;
-      height = (peekInfo.agentEvents?.length ?? 0) > 1
-        ? motionTokens.geometry.tallPeek.multiMessageBase + Math.min(peekInfo.agentEvents?.length ?? 0, 5) * motionTokens.geometry.tallPeek.rowHeight
-        : peekInfo.chatMessages.length > 1
-        ? motionTokens.geometry.tallPeek.multiMessageBase + peekInfo.chatMessages.length * motionTokens.geometry.tallPeek.rowHeight
+      height = (peekInfo.groupEvents?.length ?? 0) > 1
+        ? motionTokens.geometry.tallPeek.multiMessageBase
+          + (peekInfo.groupEvents?.length ?? 0) * motionTokens.geometry.tallPeek.rowHeight
+          + ((peekInfo.overflowCount ?? 0) > 0 ? 24 : 0)
         : peekInfo.incomingCall ? motionTokens.geometry.tallPeek.call
           : peekInfo.chatSender ? motionTokens.geometry.tallPeek.chat
             : peekInfo.actionEvent ? motionTokens.geometry.tallPeek.approval
@@ -735,7 +781,7 @@ function App() {
 
   const codexRows = primaryCodexTaskRows(tasks);
   const codex = codexRows[0] ?? initialTasks[0];
-  const antigravityTasks = tasks.filter((task) => task.source === "antigravity-cli" || task.source === "antigravity-ide");
+  const antigravityTasks = tasks.filter((task) => task.source === "antigravity-app" || task.source === "antigravity-cli" || task.source === "antigravity-ide");
   const activeAntigravityTasks = antigravityTasks
     .filter((task) => task.status === "running" || task.status === "needs_input")
     .sort((left, right) => (right.startedAt ?? 0) - (left.startedAt ?? 0));
@@ -833,16 +879,16 @@ function App() {
       meta: { app: "WhatsApp", sender: "Rina" },
     };
     eventStore.current.upsert(event);
-    setPeekInfo({ source: "WhatsApp", message: event.body ?? "", chatMessages: [], chatSender: "Rina", incomingCall: settings.whatsappCardEnabled });
-    setPulseSource("chat");
-    dispatch({ type: "set", state: "alert" });
+    showNextQueuedPeek(event.id);
   };
 
-  const showMockAntigravityTask = (source: "antigravity-cli" | "antigravity-ide") => {
+  const showMockAntigravityTask = (source: "antigravity-app" | "antigravity-cli" | "antigravity-ide") => {
     const id = source === "antigravity-cli"
       ? "a0a0a0a0-0000-4000-8000-000000000044"
+      : source === "antigravity-app"
+      ? "a0a0a0a0-0000-4000-8000-000000000046"
       : "a0a0a0a0-0000-4000-8000-000000000045";
-    const agentName = source === "antigravity-cli" ? "Antigravity CLI" : "Antigravity IDE";
+    const agentName = agentDisplayName(source);
     const previous = tasks.find((task) => task.id === id);
     const status = previous?.status === "running" ? "done" : "running";
     setTasks((current) => {
@@ -880,6 +926,48 @@ function App() {
       status: "needs_input",
       title: "Package installation needs permission",
     }, receivedAt);
+    showNextQueuedPeek();
+  };
+
+  const showMockMixedBurst = () => {
+    const receivedAt = Date.now();
+    const chatId = `mock-mixed-chat-${receivedAt}`;
+    const taskId = `mock-mixed-ai-${receivedAt}`;
+    eventStore.current.upsert({
+      id: taskId,
+      source: "ai",
+      agent: "antigravity-app",
+      sessionId: `mock-mixed-session-${receivedAt}`,
+      kind: "task",
+      status: "done",
+      title: "Antigravity App task completed",
+    }, receivedAt);
+    eventStore.current.upsert({
+      id: chatId,
+      source: "chat",
+      kind: "message",
+      status: "unread",
+      title: "Rina",
+      body: "Can you check the latest draft?",
+      meta: { app: "WhatsApp", sender: "Rina" },
+    }, receivedAt + 100);
+    setTasks((current) => upsertTask(current, {
+      id: taskId,
+      source: "antigravity-app",
+      name: "Antigravity App",
+      status: "done",
+      title: "Antigravity App task completed",
+      progress: 1,
+      startedAt: receivedAt,
+    }));
+    setMessages((current) => upsertChatMessage(current, {
+      id: chatId,
+      sender: "Rina",
+      body: "Can you check the latest draft?",
+      receivedAt,
+      createdAt: receivedAt,
+      unread: true,
+    }));
     showNextQueuedPeek();
   };
 
@@ -1046,7 +1134,11 @@ function App() {
           hoverLeaveTimer.current = window.setTimeout(() => {
             hoverExpanded.current = false;
             hoverLeaveTimer.current = null;
-            dispatch({ type: "hover", active: false });
+            if (peekInfo.actionEvent || peekInfo.groupEvents?.some((event) => event.status === "needs_input")) {
+              dispatch({ type: "set", state: "peek" });
+            } else {
+              dispatch({ type: "hover", active: false });
+            }
           }, motionTokens.timing.hoverLeaveDelayMs);
         }}
         ref={hudRef}
@@ -1075,43 +1167,27 @@ function App() {
           <Dot status={systemStatus} progress={systemLoad / 100} ring={systemLoad > 0} pulse={pulseSource === "system"} />
         </div>
 
-        <div className={`layer peek${(peekInfo.chatMessages.length > 1 || (peekInfo.agentEvents?.length ?? 0) > 1) ? " peek-multi" : ""}${peekInfo.actionEvent ? " peek-approval" : ""}`}>
-          {(peekInfo.agentEvents?.length ?? 0) > 1 ? (
-            <div className="peek-agent-list">
-              {peekInfo.agentEvents?.map((event) => {
-                const agent = event.agent === "codex" ? "Codex"
-                  : event.agent === "antigravity-cli" ? "Antigravity CLI"
-                    : event.agent === "antigravity-ide" ? "Antigravity IDE"
-                      : event.agent ?? "AI";
+        <div className={`layer peek${(peekInfo.groupEvents?.length ?? 0) > 1 ? " peek-multi" : ""}${peekInfo.actionEvent ? " peek-approval" : ""}`}>
+          {(peekInfo.groupEvents?.length ?? 0) > 1 ? (
+            <>
+              <div className="peek-group-heading"><b>{settingsCopy.groupedUpdates((peekInfo.groupEventIds ?? []).length)}</b></div>
+              <div className="peek-agent-list">
+              {peekInfo.groupEvents?.map((event) => {
+                const label = event.source === "ai" ? agentDisplayName(event.agent)
+                  : event.source === "system" ? systemCopy.system
+                    : `${typeof event.meta?.app === "string" ? event.meta.app : "Chat"} · ${typeof event.meta?.sender === "string" ? event.meta.sender : event.title}`;
                 const status: DotStatus = event.status === "error" || event.status === "needs_input"
                   || event.status === "done" || event.status === "warn" || event.status === "crit"
                   ? event.status
-                  : "running";
+                  : event.status === "unread" ? "done" : "running";
                 return (
-                  <div className="peek-agent-item" key={`${event.agent ?? "ai"}:${event.sessionId ?? event.id}`}>
+                  <div className="peek-agent-item" key={`${event.source}:${event.agent ?? ""}:${event.sessionId ?? event.id}`}>
                     <Dot status={status} />
-                    <div className="peek-agent-copy"><b>{agent}</b><span>{event.body || event.title}</span></div>
+                    <div className="peek-agent-copy"><b>{label}</b><span>{event.body || event.title}</span></div>
                   </div>
                 );
               })}
-              {(peekInfo.agentOverflowCount ?? 0) > 0 && <span className="peek-agent-overflow">+{peekInfo.agentOverflowCount} more</span>}
-            </div>
-          ) : peekInfo.chatMessages.length > 1 ? (
-            <>
-              <div className="peek-group-heading">
-                <Dot status="done" />
-                <b>
-                  {(typeof peekInfo.chatMessages[0]?.meta?.app === "string" && peekInfo.chatMessages[0].meta.app)
-                    || "Chat"} · {settingsCopy.chatMessages(peekInfo.chatMessages.length)}
-                </b>
-              </div>
-              <div className="peek-chat-list">
-                {peekInfo.chatMessages.map((message) => (
-                  <div className="peek-chat-item" key={message.id}>
-                    <b>{(typeof message.meta?.sender === "string" && message.meta.sender) || message.title}</b>
-                    <span>{message.body || message.title}</span>
-                  </div>
-                ))}
+              {(peekInfo.overflowCount ?? 0) > 0 && <span className="peek-agent-overflow">{settingsCopy.moreUpdates(peekInfo.overflowCount ?? 0)}</span>}
               </div>
             </>
           ) : (
@@ -1289,7 +1365,7 @@ function App() {
               </label>
               <label className="setting-toggle">
                 <span>{settingsCopy.autoStart}</span>
-                <input type="checkbox" checked={settings.autoStart} disabled={!isTauri()} onChange={(event) => {
+                <input type="checkbox" checked={settings.autoStart} disabled={!autoStartReady || !isTauri()} onChange={(event) => {
                   const enabled = event.target.checked;
                   setSettings((current) => ({ ...current, autoStart: enabled }));
                   if (isTauri()) void invoke("set_auto_start", { enabled }).catch((error: unknown) => {
@@ -1325,8 +1401,8 @@ function App() {
                 </section>
               )}
               <h4>Chat{unreadCount > 0 ? ` · ${unreadCount} unread` : ""}</h4>
-              {messages.slice(0, 3).map((message, index) => (
-                <div className={`row${exitingMessages.includes(message.id) ? " row-exit" : ""}`} key={message.id} style={{ "--row-index": index } as CSSProperties}>
+              {messages.map((message, index) => (
+                <div className={`row message-row${exitingMessages.includes(message.id) ? " row-exit" : ""}`} key={message.id} style={{ "--row-index": index } as CSSProperties}>
                   <div className="avatar whatsapp-avatar" style={{ "--avatar-hue": avatarHue(message.sender) } as CSSProperties}>{initials(message.sender)}</div>
                   <div className="tx">
                     <b>{message.sender}</b>
@@ -1362,8 +1438,10 @@ function App() {
         <nav aria-label="Mock event controls" className="controls">
           <button onClick={startTask}>Start Codex task</button>
           <button onClick={showMockAgentBurst}>Codex + Antigravity at once</button>
+          <button onClick={showMockMixedBurst}>Antigravity + WhatsApp at once</button>
           <button onClick={() => showMockAntigravityTask("antigravity-cli")}>Antigravity CLI task</button>
           <button onClick={() => showMockAntigravityTask("antigravity-ide")}>Antigravity IDE task</button>
+          <button onClick={() => showMockAntigravityTask("antigravity-app")}>Antigravity App task</button>
           <button onClick={finishTask}>Task completed</button>
           <button onClick={failTask}>Error</button>
           <button onClick={receiveMessage}>Incoming chat</button>

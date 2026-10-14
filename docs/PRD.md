@@ -86,7 +86,7 @@ The app starts directly in the system tray. It never shows a main window or a ta
 **P1**
 
 - F31. Antigravity CLI adapter (`agy` hooks).
-- F32. Antigravity IDE adapter (`hooks.json` and `transcript.jsonl`), deduplicated by `conversationId`.
+- F32. Antigravity 2.0 app and IDE adapters (`hooks.json` and `transcript.jsonl`), kept distinct and deduplicated by `conversationId` per agent.
 - F33. Codex waiting detection via rollout watcher and, optionally, `[[hooks.PermissionRequest]]`.
 - F34. Click-to-focus: window level (pid to process tree to window handle).
 - F35. Tokens and quota readout in the panel; no currency, because subscriptions have no per-token price.
@@ -138,6 +138,7 @@ The app starts directly in the system tray. It never shows a main window or a ta
 | --- | --- | --- | --- | --- |
 | Codex CLI | `notify` (turn complete), `[[hooks.PermissionRequest]]` (needs `/hooks` Trust), rollout watcher | Yes | Yes | Verify that the hook can return a decision |
 | Antigravity CLI (`agy`) | `hooks.json` or `settings.json` (location varies by version); event name passed via argv; hooks run synchronously | Yes | Unclear (`Notification` fires on turn end and on user input) | No (observe-only) |
+| Antigravity 2.0 app | `hooks.json` with `PreInvocation` and `Stop`; transcript under `~/.gemini/antigravity/brain` | Yes | Unverified | No (observe-only) |
 | Antigravity IDE | `hooks.json` in `.agents/` or `~/.gemini/config/`; stdin JSON with `conversationId`; `transcript.jsonl` as backup | Yes | Unverified | Unverified |
 | omp | Unknown | Out of scope (separate project) | No | No |
 
@@ -218,7 +219,7 @@ Symptoms seen in v0.1.0: WhatsApp notifications sometimes arrive late, some mess
 
 **Phase C: Agent adapters (1.5 weeks)**
 
-- Codex waiting detection and Antigravity CLI and IDE adapters.
+- Codex waiting detection and Antigravity app, CLI, and IDE adapters.
 
 **Phase D: Tokens, quota, and click-to-focus (1 week)**
 

@@ -7,6 +7,5 @@ export function pruneExpiredMessages(messages: DemoMessage[], now = Date.now()):
 
 export function upsertChatMessage(messages: DemoMessage[], update: DemoMessage): DemoMessage[] {
   return [update, ...messages.filter((message) => message.id !== update.id)]
-    .sort((left, right) => right.createdAt - left.createdAt || right.receivedAt - left.receivedAt)
-    .slice(0, 10);
+    .sort((left, right) => right.createdAt - left.createdAt || right.receivedAt - left.receivedAt);
 }

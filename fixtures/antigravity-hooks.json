@@ -1,4 +1,23 @@
 {
+  "app": {
+    "valid": {
+      "conversationId": "550e8400-e29b-41d4-a716-446655440010",
+      "transcriptPath": "C:\\Users\\Example\\.gemini\\antigravity\\brain\\550e8400-e29b-41d4-a716-446655440010\\.system_generated\\logs\\transcript.jsonl",
+      "terminationReason": "model_stop",
+      "fullyIdle": true
+    },
+    "malformed": {
+      "conversationId": "not-a-uuid",
+      "transcriptPath": "C:\\Users\\Example\\.gemini\\antigravity\\brain\\not-a-uuid\\.system_generated\\logs\\transcript.jsonl"
+    },
+    "unknownFields": {
+      "conversationId": "550e8400-e29b-41d4-a716-446655440011",
+      "transcriptPath": "C:\\Users\\Example\\.gemini\\antigravity\\brain\\550e8400-e29b-41d4-a716-446655440011\\.system_generated\\logs\\transcript.jsonl",
+      "terminationReason": "model_stop",
+      "fullyIdle": true,
+      "futureField": { "ignored": true }
+    }
+  },
   "cli": {
     "valid": {
       "conversationId": "550e8400-e29b-41d4-a716-446655440000",

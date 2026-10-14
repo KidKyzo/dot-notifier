@@ -106,14 +106,7 @@ fn watch_sessions(app: AppHandle) {
                             &conversation_id,
                             LogUpdate {
                                 state: TaskState::Running,
-                                title: format!(
-                                    "Antigravity {} task running",
-                                    if agent == "antigravity-cli" {
-                                        "CLI"
-                                    } else {
-                                        "IDE"
-                                    }
-                                ),
+                                title: format!("Antigravity {} task running", agent_label(agent)),
                                 started_at: latest.started_at.clone(),
                             },
                         );
@@ -136,6 +129,13 @@ fn watch_sessions(app: AppHandle) {
 fn brain_directories() -> Vec<(&'static str, PathBuf)> {
     let mut roots = Vec::new();
     if let Some(home) = std::env::var_os("USERPROFILE") {
+        let app_dir = PathBuf::from(&home)
+            .join(".gemini")
+            .join("antigravity")
+            .join("brain");
+        if app_dir.is_dir() {
+            roots.push(("antigravity-app", app_dir));
+        }
         let ide_dir = PathBuf::from(&home)
             .join(".gemini")
             .join("antigravity-ide")
@@ -224,14 +224,18 @@ fn read_updates(path: &Path, offset: u64, length: u64, agent: &str) -> (Vec<LogU
     (updates, if consumed > offset { consumed } else { length })
 }
 
+fn agent_label(agent: &str) -> &'static str {
+    match agent {
+        "antigravity-cli" => "CLI",
+        "antigravity-app" => "App",
+        _ => "IDE",
+    }
+}
+
 fn parse_transcript_line(line: &str, agent: &str) -> Option<LogUpdate> {
     let record: TranscriptLine = serde_json::from_str(line).ok()?;
     let record_type = record.record_type.as_deref()?;
-    let agent_name = if agent == "antigravity-cli" {
-        "CLI"
-    } else {
-        "IDE"
-    };
+    let agent_name = agent_label(agent);
 
     if record.status.as_deref() == Some("ERROR") {
         return Some(LogUpdate {
@@ -426,6 +430,14 @@ mod tests {
         assert_eq!(update.state, TaskState::Running);
         assert_eq!(update.title, "Antigravity IDE task running");
         assert_eq!(update.started_at.as_deref(), Some("2026-10-12T05:40:48Z"));
+    }
+
+    #[test]
+    fn parses_antigravity_app_status_separately_from_ide() {
+        let line = r#"{"type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[]}"#;
+        let update = parse_transcript_line(line, "antigravity-app").expect("parsed update");
+        assert_eq!(update.state, TaskState::Done);
+        assert_eq!(update.title, "Antigravity App task completed");
     }
 
     #[test]
