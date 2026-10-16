@@ -1,7 +1,7 @@
 export type AppEvent = {
   id: string;
   source: "ai" | "chat" | "system";
-  agent?: "codex" | "antigravity-app" | "antigravity-cli" | "antigravity-ide" | "omp";
+  agent?: "codex" | "claude" | "antigravity-app" | "antigravity-cli" | "antigravity-ide" | "external" | "omp";
   sessionId?: string;
   kind: "task" | "message" | "metric";
   status?: "running" | "done" | "error" | "needs_input" | "unread" | "warn" | "crit";

@@ -14,6 +14,7 @@
   color-scheme: light dark;
   --material-ink: #f5f5f7;
   --material-shell: rgb(24 26 32 / 72%);
+  --material-sticky: #171b22;
   --material-sheen: rgb(255 255 255 / 7%);
   --material-highlight: rgb(255 255 255 / 20%);
   --material-outline: rgb(255 255 255 / 17%);
@@ -21,6 +22,7 @@
   --material-control: rgb(255 255 255 / 9%);
   --material-hover: rgb(255 255 255 / 9%);
   --material-ring-track: rgb(255 255 255 / 30%);
+  --activity-due-ink: #ffba5c;
   color: var(--material-ink);
   background: transparent;
   font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
@@ -230,7 +232,14 @@ button:focus-visible,
   padding: 0 6px;
 }
 
-.dots.dots-now-playing { width: var(--motion-peek-width-max); padding-inline: 10px; }
+.dots.dots-with-activity {
+  width: var(--hud-width, var(--motion-peek-width-max));
+  gap: 6px;
+  padding-inline: 10px;
+}
+
+.dots-with-activity .dot:nth-last-child(3) { margin-left: auto; }
+.dots-with-activity .now-playing-peek { flex: 1 1 0; }
 
 .now-playing-peek {
   display: flex;
@@ -247,6 +256,23 @@ button:focus-visible,
 }
 
 .now-playing-peek-prefix { flex: none; }
+
+.activity-peek {
+  display: flex;
+  min-width: 0;
+  max-width: 120px;
+  flex: 1 1 0;
+  align-items: center;
+  gap: 3px;
+  overflow: hidden;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.activity-peek b { flex: none; font-weight: 600; }
+.activity-peek span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.activity-peek.is-due { color: var(--activity-due-ink); }
+.timer-peek { max-width: none; flex: none; font-variant-numeric: tabular-nums; }
 
 .now-playing-title-viewport {
   min-width: 0;
@@ -270,10 +296,44 @@ button:focus-visible,
 }
 
 .now-playing-title-track > span + span { display: none; }
-.now-playing-title-track.is-scrolling { animation: none; }
+
+.now-playing-title-track.is-scrolling {
+  display: flex;
+  width: max-content;
+  max-width: none;
+  overflow: visible;
+  animation: now-playing-marquee 9s linear 1s infinite;
+}
+
+.now-playing-title-track.is-scrolling > span {
+  display: block;
+  max-width: none;
+  flex: none;
+  overflow: visible;
+  padding-right: 28px;
+  text-overflow: clip;
+}
+
+.now-playing-title-track.is-scrolling > span + span { display: block; }
+
+@keyframes now-playing-marquee {
+  to { transform: translateX(-50%); }
+}
 
 @media (prefers-reduced-motion: reduce) {
-  .now-playing-title-track.is-scrolling { animation: none; }
+  .now-playing-title-track.is-scrolling {
+    display: block;
+    width: 100%;
+    animation: none;
+  }
+
+  .now-playing-title-track.is-scrolling > span:first-child {
+    overflow: hidden;
+    padding-right: 0;
+    text-overflow: ellipsis;
+  }
+
+  .now-playing-title-track.is-scrolling > span + span { display: none; }
 }
 
 .dot {
@@ -356,6 +416,17 @@ button:focus-visible,
   font-size: 13px;
   letter-spacing: 0.005em;
   white-space: nowrap;
+}
+
+.hud[data-s="peek"] .peek {
+  animation: peek-arrive 520ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  transform-origin: center;
+}
+
+@keyframes peek-arrive {
+  0% { transform: scale(0.94); }
+  58% { transform: scale(1.035); }
+  100% { transform: scale(1); }
 }
 
 .peek.peek-approval {
@@ -705,9 +776,35 @@ button:focus-visible,
   gap: 10px;
 }
 
+.settings-heading {
+  position: sticky;
+  top: -14px;
+  z-index: 2;
+  margin: -14px -16px 2px;
+  padding: 11px 16px 9px;
+  border-bottom: 1px solid var(--material-outline);
+  background: var(--material-sticky);
+}
+
+.settings-heading-copy { min-width: 0; }
+.settings-heading h4 { margin: 0; font-size: 14px; font-weight: 600; opacity: 0.95; }
+.settings-heading p { margin: 3px 0 0; font-size: 10px; opacity: 0.7; }
+
+.settings-section {
+  margin-top: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--material-outline);
+}
+
+.settings-section-last { padding-bottom: 0; border-bottom: 0; }
+.settings-section-title { margin: 0; font-size: 11px; font-weight: 600; opacity: 0.78; }
+
+.chat-panel-heading {
+  margin-top: 14px;
+}
+
 .panel-heading button,
-.settings-heading button,
-.settings-done {
+.settings-heading button {
   border: 1px solid var(--material-outline);
   border-radius: 8px;
   padding: 5px 9px;
@@ -721,26 +818,25 @@ button:focus-visible,
 .panel-heading button:hover,
 .panel-heading button:focus-visible,
 .settings-heading button:hover,
-.settings-heading button:focus-visible,
-.settings-done:hover,
-.settings-done:focus-visible {
+.settings-heading button:focus-visible {
   filter: brightness(1.08);
   transform: translateY(-1px);
 }
 
 .panel-heading button:active,
-.settings-heading button:active,
-.settings-done:active {
+.settings-heading button:active {
   filter: brightness(1.14);
   transform: scale(0.97);
 }
 
+.settings-heading button { flex: none; padding: 5px 10px; }
+
 .setting-field,
 .setting-toggle {
   display: grid;
-  gap: 6px;
-  margin-top: 12px;
-  font-size: 11px;
+  gap: 5px;
+  margin-top: 9px;
+  font-size: 11.5px;
 }
 
 .setting-error {
@@ -750,8 +846,8 @@ button:focus-visible,
 }
 
 .setting-field > span,
-.setting-toggle > span {
-  opacity: 0.72;
+.setting-toggle-label {
+  opacity: 0.82;
 }
 
 .setting-field select,
@@ -766,16 +862,127 @@ button:focus-visible,
   font: inherit;
 }
 
-.setting-toggle {
-  grid-template-columns: 1fr auto;
+.setting-field-hint { margin-top: -2px; font-size: 10px; opacity: 0.68; }
+
+.setting-inline-status {
+  display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 11px;
 }
 
-.settings-done {
-  width: 100%;
-  margin-top: 14px;
-  padding: 8px;
+.setting-permission-granted { color: #38b987; font-size: 10px; }
+.settings-action-btn,
+.reminder-timer-settings button,
+.activity-panel-row button {
+  border: 1px solid var(--material-outline);
+  border-radius: 8px;
+  padding: 6px 8px;
+  color: inherit;
+  background: var(--material-control);
+  cursor: pointer;
+  font: inherit;
 }
+
+.setting-toggle-control { display: flex; align-items: center; gap: 8px; }
+.setting-toggle-state { min-width: 48px; color: var(--material-ink); font-size: 10px; opacity: 0.7; text-align: right; }
+.setting-toggle-state.is-enabled { color: #5799f7; opacity: 1; }
+
+.setting-toggle {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 30px;
+  cursor: pointer;
+}
+
+.setting-toggle input[type="checkbox"] {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  flex: none;
+  margin: 0;
+  appearance: none;
+  border: 1px solid var(--material-outline);
+  border-radius: 999px;
+  background: var(--material-control);
+  cursor: pointer;
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+
+.setting-toggle input[type="checkbox"]::before {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--material-ink);
+  content: "";
+  transition: transform 140ms ease;
+}
+
+.setting-toggle input[type="checkbox"]:checked {
+  border-color: #5799f7;
+  background: #5799f7;
+}
+
+.setting-toggle input[type="checkbox"]:checked::before { background: #fff; transform: translateX(16px); }
+.setting-toggle input[type="checkbox"]:focus-visible { outline: 2px solid var(--material-ink); outline-offset: 2px; }
+.setting-toggle input[type="checkbox"]:disabled { cursor: not-allowed; opacity: 0.46; }
+.setting-toggle input[type="checkbox"]:disabled::before { background: var(--material-ink); }
+
+.reminder-repeat-toggle {
+  grid-template-columns: minmax(0, 1fr) auto;
+  font-size: 10px;
+}
+
+.reminder-timer-settings {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--material-outline);
+  border-radius: 10px;
+  background: var(--material-card);
+  font-size: 11px;
+}
+
+.reminder-timer-settings h5 { margin: 4px 0 0; font-size: 11px; font-weight: 600; }
+.reminder-timer-settings form,
+.reminder-date-field,
+.reminder-schedule-mode { display: grid; min-width: 0; gap: 6px; }
+.reminder-timer-settings input,
+.reminder-timer-settings select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--material-outline);
+  border-radius: 8px;
+  padding: 7px 9px;
+  color: var(--material-ink);
+  background: var(--material-shell);
+  font: inherit;
+}
+.duration-field { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) minmax(88px, auto); gap: 6px; }
+.timer-form { grid-template-columns: 1fr auto; align-items: end; }
+.timer-form label { display: grid; min-width: 0; gap: 5px; }
+.activity-empty { margin: 0; opacity: 0.6; }
+.activity-items { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.activity-items li,
+.timer-controls,
+.activity-panel-row { display: flex; min-width: 0; align-items: center; gap: 6px; }
+.activity-items li > span,
+.activity-panel-row > span { display: grid; min-width: 0; flex: 1; gap: 2px; }
+.activity-items b,
+.activity-panel-row b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-items small,
+.activity-panel-row small { opacity: 0.65; }
+.timer-controls { flex-wrap: wrap; }
+.timer-controls > span { flex: 1; font-variant-numeric: tabular-nums; }
+.activity-panel { display: grid; gap: 7px; margin-top: 14px; }
+.activity-panel-row { flex-wrap: wrap; font-size: 11px; }
+.activity-panel-row > span { flex-basis: 100px; }
 
 .row {
   display: flex;
@@ -977,6 +1184,7 @@ button:focus-visible,
   :root {
     --material-ink: #202127;
     --material-shell: rgb(245 247 251 / 84%);
+    --material-sticky: #f5f7fb;
     --material-sheen: rgb(255 255 255 / 72%);
     --material-highlight: rgb(255 255 255 / 92%);
     --material-outline: rgb(40 48 62 / 18%);
@@ -984,6 +1192,7 @@ button:focus-visible,
     --material-control: rgb(255 255 255 / 58%);
     --material-hover: rgb(28 39 56 / 9%);
     --material-ring-track: rgb(42 51 66 / 24%);
+    --activity-due-ink: #995400;
   }
 }
 
@@ -1004,6 +1213,7 @@ button:focus-visible,
   .dot.pulse,
   .dot.active,
   .dot.badge::before,
+  .hud[data-s="peek"] .peek,
   .row {
     animation: none;
   }
@@ -1013,11 +1223,12 @@ button:focus-visible,
   .approval-actions button,
   .panel-heading button,
   .settings-heading button,
-  .settings-done,
   .open-whatsapp {
     transition: none !important;
     transform: none !important;
     filter: none !important;
   }
+  .setting-toggle input[type="checkbox"],
+  .setting-toggle input[type="checkbox"]::before { transition: none !important; }
   .bar u { transition: none; }
 }

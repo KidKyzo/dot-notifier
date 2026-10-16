@@ -2,11 +2,13 @@ export type UserSettings = {
   peekDurationSeconds: number;
   monitoredApps: string[];
   autoStart: boolean;
+  codexEnabled: boolean;
   corner: "top-left" | "top-right" | "bottom-left" | "bottom-right";
   monitorKey: string | null;
   nowPlayingEnabled: boolean;
   nowPlayingPeekEnabled: boolean;
   nowPlayingBrowserMediaEnabled: boolean;
+  reminderTimerEnabled: boolean;
   whatsappCardEnabled: boolean;
   whatsappNotificationsEnabled: boolean;
   allowDuringFullscreen: boolean;
@@ -16,11 +18,13 @@ export const defaultSettings: UserSettings = {
   peekDurationSeconds: 4,
   monitoredApps: ["WhatsApp"],
   autoStart: false,
+  codexEnabled: true,
   corner: "top-right",
   monitorKey: null,
   nowPlayingEnabled: false,
   nowPlayingPeekEnabled: false,
   nowPlayingBrowserMediaEnabled: false,
+  reminderTimerEnabled: false,
   whatsappCardEnabled: false,
   whatsappNotificationsEnabled: true,
   allowDuringFullscreen: false,
@@ -47,6 +51,7 @@ export const loadSettings = (storage: Pick<Storage, "getItem">): UserSettings =>
         : defaultSettings.peekDurationSeconds,
       monitoredApps: storedApps.length > 0 ? storedApps : defaultSettings.monitoredApps,
       autoStart: typeof record.autoStart === "boolean" ? record.autoStart : defaultSettings.autoStart,
+      codexEnabled: typeof record.codexEnabled === "boolean" ? record.codexEnabled : defaultSettings.codexEnabled,
       corner: record.corner === "top-left" || record.corner === "top-right"
         || record.corner === "bottom-left" || record.corner === "bottom-right"
         ? record.corner
@@ -56,6 +61,9 @@ export const loadSettings = (storage: Pick<Storage, "getItem">): UserSettings =>
       nowPlayingPeekEnabled: typeof record.nowPlayingPeekEnabled === "boolean" ? record.nowPlayingPeekEnabled : false,
       nowPlayingBrowserMediaEnabled: typeof record.nowPlayingBrowserMediaEnabled === "boolean"
         ? record.nowPlayingBrowserMediaEnabled
+        : false,
+      reminderTimerEnabled: typeof record.reminderTimerEnabled === "boolean"
+        ? record.reminderTimerEnabled
         : false,
       whatsappCardEnabled: typeof record.whatsappCardEnabled === "boolean" ? record.whatsappCardEnabled : false,
       whatsappNotificationsEnabled: typeof record.whatsappNotificationsEnabled === "boolean"

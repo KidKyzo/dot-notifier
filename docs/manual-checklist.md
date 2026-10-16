@@ -30,4 +30,5 @@
 - [ ] Run a live Antigravity 2.0 app task and verify its own running, completed, and failed rows appear without being labeled IDE; check hook delivery after enabling or refreshing the Settings integration.
 - [ ] Leave a WhatsApp toast in Action Center for over ten minutes, then receive a new one during an AI task peek. Verify the old toast does not re-peek, the new message leads, the mixed group shows both sources and the true count, and hovering reveals every message in the scrollable panel.
 - [ ] Enable Now Playing and verify title, artist, artwork, playback state, and controls for Spotify and Apple Music; then opt into browser media and verify a YouTube Music tab in Chrome/Edge. Confirm browser media is excluded when the opt-in is off.
+- [ ] Schedule a reminder and start a timer, then enable Now Playing. Confirm all active labels fit left of the dots, the pill grows without leaving the work area, due items alert once, and timer time survives app restart and sleep/resume.
 - [ ] Enable WhatsApp style cards and verify sender initials, single-line message preview, incoming call detection, and the Open WhatsApp action with real Windows notifications.
