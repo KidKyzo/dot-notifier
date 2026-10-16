@@ -2,7 +2,10 @@ use std::fs;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc, Mutex,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -58,12 +61,29 @@ impl Event {
                 self.agent.as_deref().is_none_or(|agent| {
                     matches!(
                         agent,
-                        "codex" | "antigravity-app" | "antigravity-cli" | "antigravity-ide" | "omp"
+                        "codex"
+                            | "claude"
+                            | "antigravity-app"
+                            | "antigravity-cli"
+                            | "antigravity-ide"
+                            | "external"
+                            | "omp"
                     )
-                }) && self
-                    .session_id
-                    .as_ref()
-                    .is_none_or(|value| !value.trim().is_empty())
+                }) && (self.agent.as_deref() != Some("external")
+                    || (self
+                        .session_id
+                        .as_ref()
+                        .is_some_and(|id| !id.trim().is_empty())
+                        && self
+                            .meta
+                            .as_ref()
+                            .and_then(|meta| meta.get("product"))
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(is_external_product)))
+                    && self
+                        .session_id
+                        .as_ref()
+                        .is_none_or(|value| !value.trim().is_empty())
                     && matches!(
                         self.status.as_deref(),
                         Some("running" | "done" | "error" | "needs_input")
@@ -99,6 +119,16 @@ impl Event {
     }
 }
 
+fn is_external_product(product: &str) -> bool {
+    !product.is_empty()
+        && product.len() <= 48
+        && product.as_bytes()[0].is_ascii_alphanumeric()
+        && product
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'.' | b'_' | b'-'))
+        && product.trim() == product
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionInfo {
@@ -110,6 +140,7 @@ pub fn start(
     app: AppHandle,
     session_dir: &Path,
     approvals: Arc<ApprovalRegistry>,
+    codex_enabled: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| error.to_string())?;
     listener
@@ -131,10 +162,18 @@ pub fn start(
                     let token = token.clone();
                     let filter = notification_filter.clone();
                     let approvals = approvals.clone();
+                    let codex_enabled = codex_enabled.clone();
                     let _ = thread::Builder::new()
                         .name("dot-notifier-bus-client".into())
                         .spawn(move || {
-                            handle_connection(&app, stream, &token, &filter, &approvals)
+                            handle_connection(
+                                &app,
+                                stream,
+                                &token,
+                                &filter,
+                                &approvals,
+                                &codex_enabled,
+                            )
                         });
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
@@ -174,6 +213,7 @@ fn handle_connection(
     token: &str,
     notification_filter: &Mutex<NotificationFilter>,
     approvals: &ApprovalRegistry,
+    codex_enabled: &AtomicBool,
 ) {
     if !is_authorized_upgrade(&stream, token) {
         use std::io::Write;
@@ -205,6 +245,12 @@ fn handle_connection(
             return;
         }
     };
+    if event.source == "ai"
+        && event.agent.as_deref() == Some("codex")
+        && !codex_enabled.load(Ordering::Acquire)
+    {
+        return;
+    }
     event.actions = None;
     event.action_nonce = None;
     event.pid = event.pid.map(focus::focus_target_pid);
@@ -255,6 +301,9 @@ fn handle_connection(
     if let Some((nonce, receiver)) = pending {
         let expires_at = Instant::now() + APPROVAL_WAIT_LIMIT;
         loop {
+            if !codex_enabled.load(Ordering::Acquire) {
+                break;
+            }
             match receiver.try_recv() {
                 Ok(decision) => {
                     let response = match decision {
@@ -541,6 +590,50 @@ mod tests {
         let app = parse_event(&payload.replace("codex", "antigravity-app"))
             .expect("Antigravity app task is supported");
         assert_eq!(app.agent.as_deref(), Some("antigravity-app"));
+        let claude =
+            parse_event(&payload.replace("codex", "claude")).expect("Claude task is supported");
+        assert_eq!(claude.agent.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn accepts_valid_claude_payload_ignores_extra_fields_and_rejects_malformed_payloads() {
+        let payloads: serde_json::Value =
+            serde_json::from_str(include_str!("../../fixtures/claude-notify.json"))
+                .expect("Claude fixture JSON is valid");
+        let valid = parse_event(&payloads["valid"].to_string()).expect("valid Claude event");
+        let with_extra = parse_event(&payloads["unknownFields"].to_string())
+            .expect("unknown fields are ignored");
+
+        assert!(valid.is_valid());
+        assert_eq!(valid.agent.as_deref(), Some("claude"));
+        assert_eq!(valid.status.as_deref(), Some("done"));
+        assert_eq!(with_extra.status.as_deref(), Some("needs_input"));
+        assert!(parse_event(&payloads["malformed"].to_string()).is_none());
+    }
+
+    #[test]
+    fn external_events_require_a_safe_product_and_session() {
+        let payloads: serde_json::Value =
+            serde_json::from_str(include_str!("../../fixtures/external-notify.json"))
+                .expect("external fixture JSON is valid");
+        let valid = parse_event(&payloads["valid"].to_string()).expect("valid external event");
+        assert_eq!(valid.agent.as_deref(), Some("external"));
+        assert_eq!(
+            valid
+                .meta
+                .as_ref()
+                .and_then(|meta| meta["product"].as_str()),
+            Some("Example Agent")
+        );
+        assert!(parse_event(&payloads["unknownFields"].to_string()).is_some());
+        assert!(parse_event(&payloads["malformed"].to_string()).is_none());
+
+        let mut missing_session = payloads["valid"].clone();
+        missing_session
+            .as_object_mut()
+            .expect("fixture is object")
+            .remove("sessionId");
+        assert!(parse_event(&missing_session.to_string()).is_none());
     }
 
     #[test]

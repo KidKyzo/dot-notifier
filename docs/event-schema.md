@@ -10,7 +10,7 @@ System metrics use the same envelope with `source: "system"` and
 | --- | --- | --- | --- |
 | `id` | string | yes | UUID; identifies this snapshot |
 | `source` | enum | yes | `ai`, `chat`, or `system` |
-| `agent` | enum | no | `codex`, `antigravity-app`, `antigravity-cli`, `antigravity-ide`, or `omp` |
+| `agent` | enum | no | `codex`, `claude`, `antigravity-app`, `antigravity-cli`, `antigravity-ide`, `external`, or `omp` |
 | `sessionId` | string | no | Non-empty agent session or conversation id |
 | `kind` | enum | yes | `task`, `message`, or `metric` |
 | `status` | enum | task/message: yes; metric: no | `running`, `done`, `error`, `needs_input`, `unread`, `warn`, or `crit` |
@@ -23,12 +23,15 @@ System metrics use the same envelope with `source: "system"` and
 | `usage` | object | no | Optional `tokens` and `quotaLeft` values |
 | `actions` | string array | no | `approve` or `reject`; present only when the agent can act on the response |
 | `actionNonce` | string | no | Single-use nonce bound to the active approval event; paired with `actions` |
-| `meta` | object | no | Source-specific metadata |
+| `meta` | object | no | Source-specific metadata; `external` requires a safe `product` label |
 
 Allowed source/kind/status combinations:
 
 - `ai` task events accept an optional supported `agent` and non-empty
   `sessionId`, and use one of `running`, `done`, `error`, or `needs_input`.
+- `external` task events require `sessionId` and `meta.product`. The product
+  label is at most 48 ASCII letters, digits, spaces, dots, underscores, or
+  hyphens. The bridge scopes `sessionId` by product to avoid collisions.
 - `chat` message events use `unread`.
 - `system` metric events use `warn` or `crit` to enter the peek queue. Normal
   metric snapshots may omit `status`.
@@ -69,6 +72,25 @@ the connection. The bus accepts a schema event envelope, a Codex `notify`
 payload, or a Codex `PermissionRequest` hook payload and validates it before
 sending `bus-event` to the UI. Invalid payloads are dropped with a diagnostic
 that does not include content. Unknown fields are ignored.
+
+## Generic agent bridge
+
+Products that expose task lifecycle hooks can invoke `scripts/agent-notify.ps1`
+with an absolute script path and three arguments. Each status update for one
+task must reuse the same product and session ID:
+
+```powershell
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\path\to\Dotfication\scripts\agent-notify.ps1" -Product "Example Agent" -SessionId "session-123" -Status "running"
+```
+
+Accepted statuses are `running`, `needs_input`, `done`, and `error`. Invoke the
+script again at the corresponding lifecycle event. The bridge sends a static
+status title and product label only; it ignores prompts, messages, and task
+content. It reads Dot Notifier's local session token and sends one authenticated
+WebSocket event to `127.0.0.1`. Failed delivery never blocks the agent. Register
+the command only in a product's actual hooks or event system; running a Chat UI
+without lifecycle events cannot produce reliable task status. In particular,
+Claude's regular Chat tab does not run Claude Code hooks.
 
 The Codex hook maps the currently supported `agent-turn-complete` notification
 to an `ai` task event. Codex supplies its JSON as a command argument; the script
@@ -132,6 +154,26 @@ The official Antigravity hook contract is documented at
 <https://antigravity.google/docs/hooks>. The installed `agy` version and IDE
 runtime still require manual verification; see `docs/spikes/antigravity-cli.md`
 `docs/spikes/antigravity-ide.md` and `docs/spikes/antigravity-app.md`.
+
+Claude Code hooks are opt-in from Settings. Enabling them copies
+`scripts/claude-notify.ps1` into Dot Notifier's local data directory and adds
+`UserPromptSubmit`, `Stop`, `Notification`, and `PermissionRequest` handlers to the user's
+`~/.claude/settings.json`. Existing settings are backed up and preserved;
+disabling the option removes only Dot Notifier's entries. No hook configuration
+is edited at app startup. The handlers run asynchronously and report only
+`running`, `done`, or `needs_input` status with the Claude session ID. `UserPromptSubmit`
+sets `running`, `Stop` sets `done`, and Claude's attention notifications or
+permission requests set `needs_input`. Permission requests
+always fall through; the hook does not make approval decisions. Message text,
+tool input, transcript paths, and working directories are ignored. A stable
+UUID derived from the session ID is used for the required event `id`, while
+upserts use `agent` plus `sessionId`.
+
+Anthropic documents these hooks for Claude Code terminal, IDE, and desktop app
+sessions in its [Hooks reference](https://code.claude.com/docs/en/hooks).
+User-level hooks do not apply to cloud sessions. Live delivery and the installed
+Claude Code version still require manual verification; see
+`docs/spikes/claude-code.md`.
 
 The protocol and schema version must be reviewed together before changing
 either one.

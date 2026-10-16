@@ -1,64 +1,77 @@
 param(
-    [string]$State = "done",
-    [string]$Title = "Claude task completed"
+    [ValidateSet("UserPromptSubmit", "Stop", "Notification", "PermissionRequest")]
+    [string]$Event = "Stop"
 )
 
 $ErrorActionPreference = "Stop"
-$payloadText = if ($args.Count -gt 0) { [string]$args[0] } else { [Console]::In.ReadToEnd() }
 
-$threadId = $null
-$message = $null
+try {
+    $payloadText = [Console]::In.ReadToEnd()
+    if ([string]::IsNullOrWhiteSpace($payloadText) -or $payloadText.Length -gt 65536) { exit 0 }
+    $payload = ConvertFrom-Json -InputObject $payloadText -ErrorAction Stop
+    $sessionId = [string]$payload.session_id
+    if ([string]::IsNullOrWhiteSpace($sessionId) -or $sessionId.Length -gt 256) { exit 0 }
 
-if (-not [string]::IsNullOrWhiteSpace($payloadText)) {
-    try {
-        $notification = ConvertFrom-Json -InputObject $payloadText -ErrorAction SilentlyContinue
-        if ($notification) {
-            $threadId = $notification.'thread-id'
-            if (-not $threadId) { $threadId = $notification.thread_id }
-            if (-not $threadId) { $threadId = $notification.sessionId }
-            if (-not $threadId) { $threadId = $notification.session_id }
-
-            $msg = $notification.'last-assistant-message'
-            if (-not $msg) { $msg = $notification.message }
-            if ($msg -is [string]) { $message = $msg }
+    $status = switch ($Event) {
+        "UserPromptSubmit" { "running"; break }
+        "Stop" { "done"; break }
+        "PermissionRequest" { "needs_input"; break }
+        "Notification" {
+            switch ([string]$payload.notification_type) {
+                { $_ -in @("idle_prompt", "agent_needs_input") } { "needs_input"; break }
+                default { $null }
+            }
+            break
         }
-    } catch {
-        # ignore parse error, use defaults
     }
-}
+    if ($null -eq $status) { exit 0 }
 
-if ([string]::IsNullOrWhiteSpace($threadId) -or $threadId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-    # Well-known fallback UUID for Claude task
-    $threadId = "c1a0de00-0000-4000-8000-000000000001"
-}
-
-if ($message) {
-    $message = ($message -replace '\s+', ' ').Trim()
-    if ($message.Length -gt 280) { $message = $message.Substring(0, 277) + "..." }
-}
-
-$eventJson = @{
-    id = $threadId.ToLowerInvariant()
-    source = "codex"
-    kind = "task"
-    status = if ($State -eq "running") { "running" } else { "done" }
-    title = $Title
-    body = $message
-} | ConvertTo-Json -Compress
-
-$sessionPath = Join-Path $env:LOCALAPPDATA "com.dotnotifier.app\bus-session.json"
-if (Test-Path -LiteralPath $sessionPath) {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
     try {
-        $session = Get-Content -Raw -LiteralPath $sessionPath | ConvertFrom-Json -ErrorAction Stop
-        $socket = [System.Net.WebSockets.ClientWebSocket]::new()
-        $socket.Options.SetRequestHeader("Authorization", "Bearer $($session.token)")
-        $null = $socket.ConnectAsync([Uri]"$($session.url)", [Threading.CancellationToken]::None).GetAwaiter().GetResult()
+        $hash = $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($sessionId))
+    } finally {
+        $sha256.Dispose()
+    }
+    $guidBytes = [byte[]]$hash[0..15]
+    $guidBytes[6] = ($guidBytes[6] -band 0x0F) -bor 0x40
+    $guidBytes[8] = ($guidBytes[8] -band 0x3F) -bor 0x80
+    $eventId = [Guid]::new($guidBytes).ToString().ToLowerInvariant()
+    $title = switch ($status) {
+        "running" { "Claude is working" }
+        "done" { "Claude task completed" }
+        default { "Claude is waiting for you" }
+    }
+    $eventJson = @{
+        id = $eventId
+        source = "ai"
+        agent = "claude"
+        sessionId = $sessionId
+        kind = "task"
+        status = $status
+        title = $title
+    } | ConvertTo-Json -Compress
+
+    $sessionPath = Join-Path (Split-Path -Parent $PSScriptRoot) "bus-session.json"
+    if (-not (Test-Path -LiteralPath $sessionPath)) { exit 0 }
+    $busSession = Get-Content -Raw -LiteralPath $sessionPath | ConvertFrom-Json -ErrorAction Stop
+    $uri = [Uri]$busSession.url
+    if ($uri.Scheme -ne "ws" -or -not $uri.IsLoopback -or [string]$busSession.token -notmatch '^[0-9a-f]{64}$') { exit 0 }
+
+    $socket = [System.Net.WebSockets.ClientWebSocket]::new()
+    $socket.Options.SetRequestHeader("Authorization", "Bearer $($busSession.token)")
+    $timeout = [Threading.CancellationTokenSource]::new([TimeSpan]::FromMilliseconds(1500))
+    try {
+        $socket.ConnectAsync($uri, $timeout.Token).GetAwaiter().GetResult()
         $bytes = [Text.Encoding]::UTF8.GetBytes($eventJson)
         $segment = [ArraySegment[byte]]::new($bytes)
-        $null = $socket.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, [Threading.CancellationToken]::None).GetAwaiter().GetResult()
-        $null = $socket.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "sent", [Threading.CancellationToken]::None).GetAwaiter().GetResult()
+        $socket.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $timeout.Token).GetAwaiter().GetResult()
+    } finally {
+        $socket.Abort()
+        $timeout.Dispose()
         $socket.Dispose()
-    } catch {
-        # Fail open
     }
+} catch {
+    # Notification hooks are best effort and never affect Claude Code.
 }
+
+exit 0

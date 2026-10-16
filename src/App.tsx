@@ -3,8 +3,9 @@ import type { CSSProperties, KeyboardEvent, MouseEvent } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { islandReducer } from "./core/island-state";
+import { isHudToggleShortcut } from "./core/hud-keyboard";
 import { CHAT_RETENTION_MS, EventStore, eventCreatedAtMs, type AppEvent } from "./core/event-store";
-import { pruneExpiredMessages, upsertChatMessage } from "./core/chat-retention";
+import { isWhatsAppApp, pruneExpiredMessages, removeWhatsAppMessages, upsertChatMessage } from "./core/chat-retention";
 import {
   aggregateTaskStatus,
   primaryCodexTaskRows,
@@ -14,6 +15,22 @@ import { initialSystemMetrics, mockSystemAlert, parseSystemMetrics } from "./cor
 import { systemCopy } from "./core/system-copy";
 import { settingsCopy } from "./core/settings-copy";
 import { defaultSettings, loadSettings, parseMonitoredApps, type UserSettings } from "./core/settings";
+import {
+  clearFinishedTimer,
+  acknowledgeDueReminder,
+  durationToMs,
+  formatCountdown,
+  formatDuration,
+  loadReminderTimer,
+  maxReminders,
+  nextDueActivity,
+  nextReminderDelayMs,
+  saveReminderTimer,
+  timerRemainingMs,
+  type DurationUnit,
+  type Reminder,
+  type ReminderTimerState,
+} from "./core/reminder-timer";
 import { isIncomingWhatsAppCall, isWhatsAppNotification } from "./core/whatsapp-calls";
 import {
   advanceSpringAxis,
@@ -36,8 +53,9 @@ import "./App.css";
 
 type PulseSource = "ai" | "codex" | "chat" | "system";
 type DotStatus = DemoStatus | "warn" | "crit";
-type PeekInfo = { source: string; message: string; chatMessages: AppEvent[]; groupEvents?: AppEvent[]; groupEventIds?: string[]; overflowCount?: number; actionEvent?: AppEvent; chatSender?: string; chatApp?: string; incomingCall?: boolean };
+type PeekInfo = { source: string; message: string; dotStatus: DotStatus; chatMessages: AppEvent[]; groupEvents?: AppEvent[]; groupEventIds?: string[]; overflowCount?: number; actionEvent?: AppEvent; chatSender?: string; chatApp?: string; incomingCall?: boolean };
 type MonitorOption = { key: string; label: string; width: number; height: number };
+type ReminderSchedule = "after" | "at";
 type NowPlayingSnapshot = { title: string; artist: string; playing: boolean; coverDataUrl: string | null };
 type HudShape = { width: SpringAxis; height: SpringAxis; radius: SpringAxis; frame: number | null; lastFrame: number | null };
 
@@ -56,7 +74,7 @@ const statusLabels: Record<DemoStatus, string> = {
   running: "Running",
   done: "Completed",
   error: "Failed",
-  needs_input: "Needs permission",
+  needs_input: "Needs input",
 };
 
 const percent = (value: number | null) => value === null ? systemCopy.unavailable : `${Math.round(value)}%`;
@@ -64,9 +82,11 @@ const percent = (value: number | null) => value === null ? systemCopy.unavailabl
 const initials = (name: string) => name.trim().split(/\s+/).slice(0, 2).map((part) => Array.from(part)[0] ?? "").join("").toUpperCase() || "?";
 
 const avatarHue = (name: string) => Array.from(name).reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) % 360, 0);
-const agentDisplayName = (agent?: AppEvent["agent"]): string => {
+const agentDisplayName = (agent?: AppEvent["agent"], meta?: AppEvent["meta"]): string => {
+  if (agent === "external" && typeof meta?.product === "string") return meta.product;
   switch (agent) {
     case "codex": return "Codex";
+    case "claude": return "Claude";
     case "antigravity-app": return "Antigravity App";
     case "antigravity-cli": return "Antigravity CLI";
     case "antigravity-ide": return "Antigravity IDE";
@@ -74,11 +94,52 @@ const agentDisplayName = (agent?: AppEvent["agent"]): string => {
   }
 };
 
+const eventDotStatus = (event: AppEvent): DotStatus => {
+  if (event.status === "unread") return "done";
+  return event.status ?? "running";
+};
+
+const reminderTimingLabel = (reminder: Reminder, now: number): string => {
+  if (!reminder.relative) return settingsCopy.reminderAt(new Date(reminder.dueAt));
+  if (reminder.dueAt <= now) return settingsCopy.reminderDue;
+  const next = formatCountdown(reminder.dueAt - now);
+  return reminder.repeatMs
+    ? settingsCopy.reminderRepeats(formatDuration(reminder.repeatMs), next)
+    : settingsCopy.reminderAfter(next);
+};
+
 const metricUsage = (used: number | null, total: number | null, value: number | null) => {
   if (value === null) return systemCopy.unavailable;
   if (used === null || total === null) return percent(value);
   return `${(used / 1024).toFixed(1)}/${(total / 1024).toFixed(1)} GB · ${percent(value)}`;
 };
+
+function SettingsSwitch({ label, checked, disabled = false, className = "", onChange }: {
+  label: string;
+  checked: boolean;
+  disabled?: boolean;
+  className?: string;
+  onChange: (enabled: boolean) => void;
+}) {
+  return (
+    <label className={`setting-toggle${className ? ` ${className}` : ""}`}>
+      <span className="setting-toggle-label">{label}</span>
+      <span className="setting-toggle-control">
+        <span aria-hidden="true" className={`setting-toggle-state${checked ? " is-enabled" : ""}`}>
+          {checked ? settingsCopy.enabled : settingsCopy.disabled}
+        </span>
+        <input
+          aria-label={label}
+          checked={checked}
+          disabled={disabled}
+          onChange={(event) => onChange(event.currentTarget.checked)}
+          role="switch"
+          type="checkbox"
+        />
+      </span>
+    </label>
+  );
+}
 
 function SystemMetric({ label, value, samples }: {
   label: string;
@@ -157,16 +218,30 @@ function App() {
   const [exitingMessages, setExitingMessages] = useState<string[]>([]);
   const [systemMetrics, setSystemMetrics] = useState(initialSystemMetrics);
   const unreadCount = messages.filter((message) => message.unread).length;
+  const whatsappMessageCount = messages.filter((message) => isWhatsAppApp(message.app)).length;
   const [messageIndex, setMessageIndex] = useState(0);
-  const [peekInfo, setPeekInfo] = useState<PeekInfo>({ source: "Codex", message: "", chatMessages: [] });
+  const [peekInfo, setPeekInfo] = useState<PeekInfo>({ source: "Codex", message: "", dotStatus: "idle", chatMessages: [] });
   const [pulseSource, setPulseSource] = useState<PulseSource | null>(null);
   const [paused, setPaused] = useState(false);
   const [quietMode, setQuietMode] = useState(false);
   const [quietEnvironment, setQuietEnvironment] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<UserSettings>(() => loadSettings(window.localStorage));
+  const [reminderTimer, setReminderTimer] = useState<ReminderTimerState>(() =>
+    clearFinishedTimer(loadReminderTimer(window.localStorage), Date.now()));
+  const [reminderTitle, setReminderTitle] = useState("");
+  const [reminderDateTime, setReminderDateTime] = useState("");
+  const [reminderSchedule, setReminderSchedule] = useState<ReminderSchedule>("after");
+  const [reminderDuration, setReminderDuration] = useState("5");
+  const [reminderDurationUnit, setReminderDurationUnit] = useState<DurationUnit>("minutes");
+  const [repeatReminder, setRepeatReminder] = useState(false);
+  const [timerDuration, setTimerDuration] = useState("5");
+  const [timerDurationUnit, setTimerDurationUnit] = useState<DurationUnit>("minutes");
+  const [activityError, setActivityError] = useState("");
+  const [clockMs, setClockMs] = useState(Date.now());
   const [autoStartReady, setAutoStartReady] = useState(!isTauri());
   const [antigravityHooksEnabled, setAntigravityHooksEnabled] = useState(false);
+  const [claudeHooksEnabled, setClaudeHooksEnabled] = useState(false);
   const [monitoredAppsText, setMonitoredAppsText] = useState(settings.monitoredApps.join(", "));
   const [notificationPermission, setNotificationPermission] = useState<boolean | null>(null);
   const [monitors, setMonitors] = useState<MonitorOption[]>([]);
@@ -188,8 +263,14 @@ function App() {
   const hudRef = useRef<HTMLElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const nowPlayingTitleRef = useRef<HTMLSpanElement>(null);
-  const nowPlayingPeekRef = useRef<HTMLSpanElement>(null);
+  const nowPlayingTitleTextRef = useRef<HTMLSpanElement>(null);
+  const lastAlertedActivityId = useRef<string | null>(null);
   const settingsRef = useRef(settings);
+  const peekInfoRef = useRef(peekInfo);
+  peekInfoRef.current = peekInfo;
+  const visibleTimer = settings.reminderTimerEnabled ? reminderTimer.timer : null;
+  const visibleTimerMs = visibleTimer ? timerRemainingMs(visibleTimer, clockMs) : 0;
+  const showNowPlayingStrip = settings.nowPlayingEnabled && settings.nowPlayingPeekEnabled && nowPlaying?.playing === true;
   const hudShapeRef = useRef<HudShape>({
     width: createSpringAxis(motionTokens.geometry.idle.width),
     height: createSpringAxis(motionTokens.geometry.idle.height),
@@ -223,13 +304,14 @@ function App() {
     const incomingCall = cardEnabled && isIncomingWhatsAppCall(next);
     setPeekInfo({
       source: next.source === "ai"
-        ? agentDisplayName(next.agent)
+        ? agentDisplayName(next.agent, next.meta)
       : next.source === "system"
         ? systemCopy.system
         : chatSource,
       message: next.source === "system"
         ? next.status === "crit" ? systemCopy.criticalAlert : systemCopy.warningAlert
         : (next.body || next.title),
+      dotStatus: eventDotStatus(next),
       chatMessages,
       ...(groupedEvents.length > 1 ? {
         groupEvents: groupedEvents.slice(0, 5),
@@ -306,12 +388,13 @@ function App() {
 
   useEffect(() => {
     if (!isTauri()) return;
-    const running = tasks.filter((task) => task.status === "running").length;
-    const waiting = tasks.filter((task) => task.status === "needs_input").length;
+    const visibleTasks = settings.codexEnabled ? tasks : tasks.filter((task) => task.source !== "codex");
+    const running = visibleTasks.filter((task) => task.status === "running").length;
+    const waiting = visibleTasks.filter((task) => task.status === "needs_input").length;
     void invoke("update_tray_status", { running, waiting }).catch((error: unknown) => {
       console.warn("Could not update tray status", error);
     });
-  }, [tasks]);
+  }, [tasks, settings.codexEnabled]);
 
   useEffect(() => {
     const oldestMessageExpiry = messages.reduce<number | undefined>((next, message) => {
@@ -371,6 +454,73 @@ function App() {
   }, [settings]);
 
   useEffect(() => {
+    if (isTauri()) {
+      void invoke("set_codex_enabled", { enabled: settings.codexEnabled })
+        .catch((error: unknown) => console.warn("Could not update Codex integration", error));
+    }
+    if (settings.codexEnabled) return;
+
+    const codexEvents = eventStore.current.all().filter((event) => event.source === "ai" && event.agent === "codex");
+    const codexIds = new Set(codexEvents.map((event) => event.id));
+    const activePeek = peekInfoRef.current;
+    const activeCodexPeek = activePeekIds.current.some((id) => codexIds.has(id))
+      || activePeek.source === "Codex"
+      || activePeek.actionEvent?.agent === "codex"
+      || activePeek.groupEvents?.some((event) => event.agent === "codex") === true;
+    codexEvents.forEach((event) => eventStore.current.dismiss(event.id));
+    activePeekIds.current = activePeekIds.current.filter((id) => !codexIds.has(id));
+    setTasks((current) => current.filter((task) => task.source !== "codex"));
+    if (activeCodexPeek) {
+      dispatch({ type: "dismiss" });
+      setPulseSource(null);
+      showNextQueuedPeek();
+    }
+  }, [settings.codexEnabled]);
+
+  useEffect(() => {
+    try {
+      saveReminderTimer(window.localStorage, reminderTimer);
+    } catch (error) {
+      console.warn("Could not save reminder and timer settings", error);
+    }
+  }, [reminderTimer]);
+
+  useEffect(() => {
+    setReminderTimer((current) => clearFinishedTimer(current, clockMs));
+  }, [clockMs]);
+
+  useEffect(() => {
+    if (!settings.reminderTimerEnabled) return;
+    const timer = reminderTimer.timer;
+    const runningTimerRemaining = timer?.remainingMs === null
+      ? timer.endsAt - clockMs : null;
+    const reminderDelay = nextReminderDelayMs(reminderTimer.reminders, clockMs);
+    const delay = runningTimerRemaining !== null && runningTimerRemaining > 0
+      ? Math.min(1_000, runningTimerRemaining)
+      : reminderDelay;
+    if (delay === null) return;
+    const timeout = window.setTimeout(() => setClockMs(Date.now()), Math.max(1, delay));
+    return () => window.clearTimeout(timeout);
+  }, [settings.reminderTimerEnabled, reminderTimer, clockMs]);
+
+  useEffect(() => {
+    if (!settings.reminderTimerEnabled || state !== "idle" || paused || quietMode || quietEnvironment) return;
+    const due = nextDueActivity(reminderTimer, clockMs);
+    const dueKey = due ? `${due.id}:${due.dueAt}` : null;
+    if (!due || lastAlertedActivityId.current === dueKey) return;
+    lastAlertedActivityId.current = dueKey;
+    setReminderTimer((current) => acknowledgeDueReminder(current, due.id, clockMs));
+    setPeekInfo({
+      source: settingsCopy.reminder,
+      message: due.title,
+      dotStatus: "done",
+      chatMessages: [],
+    });
+    setPulseSource(null);
+    dispatch({ type: "set", state: "alert" });
+  }, [settings.reminderTimerEnabled, reminderTimer, clockMs, state, paused, quietMode, quietEnvironment]);
+
+  useEffect(() => {
     if (!isTauri()) return;
     let active = true;
     void invoke<boolean>("get_auto_start")
@@ -392,6 +542,9 @@ function App() {
     void invoke<boolean>("get_antigravity_hooks_enabled")
       .then(setAntigravityHooksEnabled)
       .catch((error: unknown) => console.warn("Could not read Antigravity hook status", error));
+    void invoke<boolean>("get_claude_hooks_enabled")
+      .then(setClaudeHooksEnabled)
+      .catch((error: unknown) => console.warn("Could not read Claude hook status", error));
   }, []);
 
   useEffect(() => {
@@ -542,6 +695,7 @@ function App() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen<AppEvent>("bus-event", ({ payload }) => {
+      if (payload.source === "ai" && payload.agent === "codex" && !settingsRef.current.codexEnabled) return;
       if (payload.source !== "chat" || payload.kind !== "message") eventStore.current.upsert(payload);
       if (payload.source === "system" && payload.kind === "metric") {
         const nextMetrics = parseSystemMetrics(payload.meta);
@@ -549,14 +703,16 @@ function App() {
         if (payload.status === undefined) return;
       }
       if (payload.source === "ai"
-          && (payload.agent === "codex" || payload.agent === "antigravity-app" || payload.agent === "antigravity-cli" || payload.agent === "antigravity-ide")
+          && (payload.agent === "codex" || payload.agent === "claude" || payload.agent === "antigravity-app" || payload.agent === "antigravity-cli" || payload.agent === "antigravity-ide" || payload.agent === "external")
           && payload.kind === "task"
           && (payload.status === "running" || payload.status === "done"
             || payload.status === "error" || payload.status === "needs_input")) {
         const task: DemoTask = {
           id: payload.id,
           source: payload.agent,
-          name: `${agentDisplayName(payload.agent)} · ${payload.id.slice(0, 8)}`,
+          name: payload.agent === "external"
+            ? agentDisplayName(payload.agent, payload.meta)
+            : `${agentDisplayName(payload.agent)} · ${payload.id.slice(0, 8)}`,
           status: payload.status,
           title: payload.title,
           ...(payload.body ? { detail: payload.body } : {}),
@@ -584,6 +740,7 @@ function App() {
           sender,
           body,
           unread: true,
+          ...(typeof payload.meta?.app === "string" ? { app: payload.meta.app } : {}),
         }));
       }
 
@@ -691,13 +848,11 @@ function App() {
       height = panelRef.current.clientHeight;
       radius = motionTokens.geometry.expanded.radius;
     } else {
-      const showNowPlaying = settings.nowPlayingEnabled && settings.nowPlayingPeekEnabled && nowPlaying?.playing;
-      const labelWidth = nowPlayingPeekRef.current?.getBoundingClientRect().width ?? 190;
-      const peekWidth = Math.min(
-        motionTokens.geometry.peekWidth.maximum,
-        Math.max(motionTokens.geometry.peekWidth.minimum, Math.ceil(labelWidth + motionTokens.geometry.peekWidth.labelPadding)),
-      );
-      width = showNowPlaying ? peekWidth : motionTokens.geometry.idle.width;
+      width = showNowPlayingStrip
+        ? visibleTimer ? motionTokens.geometry.activityWidth.withNowPlayingAndTimer
+          : motionTokens.geometry.activityWidth.withNowPlaying
+        : visibleTimer ? motionTokens.geometry.activityWidth.timer
+          : motionTokens.geometry.idle.width;
     }
 
     const shape = hudShapeRef.current;
@@ -764,24 +919,45 @@ function App() {
       return;
     }
     startAnimation();
-  }, [state, tasks, messages, peekInfo, systemMetrics, settingsOpen, settings.nowPlayingEnabled, settings.nowPlayingPeekEnabled, nowPlaying, reportHitArea]);
+  }, [state, tasks, messages, peekInfo, systemMetrics, settingsOpen, settings.reminderTimerEnabled, reminderTimer, activityError, showNowPlayingStrip, nowPlaying, visibleTimer, clockMs, reportHitArea]);
 
   useLayoutEffect(() => {
-    const title = nowPlayingTitleRef.current;
-    if (!title) {
+    const viewport = nowPlayingTitleRef.current;
+    const title = nowPlayingTitleTextRef.current;
+    if (!viewport || !title) {
       setNowPlayingTitleOverflows(false);
       return;
     }
-    const updateOverflow = () => setNowPlayingTitleOverflows(title.scrollWidth > title.clientWidth + 1);
+    const updateOverflow = () => setNowPlayingTitleOverflows(title.scrollWidth > viewport.clientWidth + 1);
     updateOverflow();
     const observer = new ResizeObserver(updateOverflow);
+    observer.observe(viewport);
     observer.observe(title);
     return () => observer.disconnect();
   }, [nowPlaying?.title, settings.nowPlayingEnabled, settings.nowPlayingPeekEnabled]);
 
-  const codexRows = primaryCodexTaskRows(tasks);
+  const visibleTasks = settings.codexEnabled ? tasks : tasks.filter((task) => task.source !== "codex");
+  const codexRows = settings.codexEnabled ? primaryCodexTaskRows(visibleTasks) : [];
   const codex = codexRows[0] ?? initialTasks[0];
+  const claudeTasks = tasks.filter((task) => task.source === "claude");
+  const activeClaudeTasks = claudeTasks
+    .filter((task) => task.status === "running" || task.status === "needs_input")
+    .sort((left, right) => (right.startedAt ?? 0) - (left.startedAt ?? 0));
+  const claudeRows = activeClaudeTasks.length > 0
+    ? activeClaudeTasks
+    : [...claudeTasks].sort((left, right) => (right.startedAt ?? 0) - (left.startedAt ?? 0)).slice(0, 1);
+  if (claudeRows.length === 0 && claudeHooksEnabled) {
+    claudeRows.push({
+      id: "claude-idle",
+      source: "claude",
+      name: "Claude",
+      status: "idle",
+      title: settingsCopy.noActiveTask,
+      progress: 0,
+    });
+  }
   const antigravityTasks = tasks.filter((task) => task.source === "antigravity-app" || task.source === "antigravity-cli" || task.source === "antigravity-ide");
+  const externalTasks = tasks.filter((task) => task.source === "external");
   const activeAntigravityTasks = antigravityTasks
     .filter((task) => task.status === "running" || task.status === "needs_input")
     .sort((left, right) => (right.startedAt ?? 0) - (left.startedAt ?? 0));
@@ -799,11 +975,13 @@ function App() {
     });
   }
   const taskGroups = [
-    { name: "Codex", rows: codexRows.length > 0 ? codexRows : [codex] },
+    ...(settings.codexEnabled ? [{ name: "Codex", rows: codexRows.length > 0 ? codexRows : [codex] }] : []),
+    ...(claudeRows.length > 0 ? [{ name: "Claude", rows: claudeRows }] : []),
     ...(antigravityRows.length > 0 ? [{ name: "Antigravity", rows: antigravityRows }] : []),
+    ...(externalTasks.length > 0 ? [{ name: settingsCopy.externalAgents, rows: externalTasks }] : []),
   ];
-  const aiStatus = aggregateTaskStatus(tasks);
-  const aiHasRunning = tasks.some((task) => task.status === "running");
+  const aiStatus = aggregateTaskStatus(visibleTasks);
+  const aiHasRunning = visibleTasks.some((task) => task.status === "running");
   const isOpen = state === "expanded";
   const systemLoad = [systemMetrics.current.cpuPercent, systemMetrics.current.gpuPercent]
     .filter((value): value is number => value !== null)
@@ -814,33 +992,100 @@ function App() {
       || (systemMetrics.current.memoryPercent ?? 0) > 90 ? "warn"
       : systemLoad > 0 ? "running" : "idle";
 
-  const showPeek = (source: PulseSource, sourceName: string, message: string) => {
+  const showPeek = (source: PulseSource, sourceName: string, message: string, dotStatus: DotStatus) => {
     if (paused || quietMode || quietEnvironment) return;
-    setPeekInfo({ source: sourceName, message, chatMessages: [] });
+    setPeekInfo({ source: sourceName, message, dotStatus, chatMessages: [] });
     setPulseSource(source);
     dispatch({ type: "set", state: "alert" });
   };
 
+  const addReminder = () => {
+    const title = reminderTitle.trim();
+    const now = Date.now();
+    const durationMs = durationToMs(Number(reminderDuration), reminderDurationUnit);
+    const dueAt = reminderSchedule === "after"
+      ? durationMs === null ? Number.NaN : now + durationMs
+      : new Date(reminderDateTime).getTime();
+    if (!title || !Number.isFinite(dueAt) || dueAt <= now
+      || (reminderSchedule === "after" && durationMs === null)) {
+      setActivityError(settingsCopy.reminderInvalid);
+      return;
+    }
+    if (reminderTimer.reminders.length >= maxReminders) {
+      setActivityError(settingsCopy.reminderLimit);
+      return;
+    }
+    setReminderTimer((current) => ({
+      ...current,
+      reminders: [...current.reminders, {
+        id: crypto.randomUUID(),
+        title: title.slice(0, 80),
+        dueAt,
+        notified: false,
+        relative: reminderSchedule === "after",
+        repeatMs: reminderSchedule === "after" && repeatReminder ? durationMs : null,
+      }].sort((left, right) => left.dueAt - right.dueAt),
+    }));
+    setReminderTitle("");
+    setReminderDateTime("");
+    setRepeatReminder(false);
+    setActivityError("");
+    setClockMs(now);
+  };
+
+  const startTimer = () => {
+    const durationMs = durationToMs(Number(timerDuration), timerDurationUnit);
+    if (durationMs === null) {
+      setActivityError(settingsCopy.timerInvalid);
+      return;
+    }
+    const now = Date.now();
+    setReminderTimer((current) => ({
+      ...current,
+      timer: { id: crypto.randomUUID(), endsAt: now + durationMs, remainingMs: null, notified: false },
+    }));
+    setActivityError("");
+    setClockMs(now);
+  };
+
+  const toggleTimerPause = () => {
+    const now = Date.now();
+    setReminderTimer((current) => {
+      const timer = current.timer;
+      if (!timer || timerRemainingMs(timer, now) === 0) return current;
+      return {
+        ...current,
+        timer: timer.remainingMs === null
+          ? { ...timer, remainingMs: timerRemainingMs(timer, now) }
+          : { ...timer, endsAt: now + timer.remainingMs, remainingMs: null },
+      };
+    });
+    setClockMs(now);
+  };
+
   const startTask = () => {
+    if (!settingsRef.current.codexEnabled) return;
     const startedAt = Date.now();
     setTasks((current) => current.map((task) => task.source === "codex"
       ? { ...task, status: "running", title: "database migration", progress: 0.42, startedAt }
       : task));
-    showPeek("codex", "Codex", "Starting: database migration");
+    showPeek("codex", "Codex", "Starting: database migration", "running");
   };
 
   const finishTask = () => {
+    if (!settingsRef.current.codexEnabled) return;
     setTasks((current) => current.map((task) => task.source === "codex"
       ? { ...task, status: "done", progress: 1 }
       : task));
-    showPeek("codex", "Codex", `${codex.title} completed`);
+    showPeek("codex", "Codex", `${codex.title} completed`, "done");
   };
 
   const failTask = () => {
+    if (!settingsRef.current.codexEnabled) return;
     setTasks((current) => current.map((task) => task.source === "codex"
       ? { ...task, status: "error" }
       : task));
-    showPeek("codex", "Codex", `${codex.title} failed: 2 tests failed`);
+    showPeek("codex", "Codex", `${codex.title} failed: 2 tests failed`, "error");
   };
 
   const receiveMessage = () => {
@@ -852,6 +1097,7 @@ function App() {
       receivedAt: Date.now(),
       createdAt: Date.now(),
       unread: true,
+      app: "WhatsApp",
     };
     setMessages((current) => upsertChatMessage(current, message));
     eventStore.current.upsert({
@@ -902,7 +1148,56 @@ function App() {
         startedAt: previous?.startedAt ?? Date.now(),
       });
     });
-    showPeek("ai", agentName, `${agentName} task ${status === "running" ? "running" : "completed"}`);
+    showPeek("ai", agentName, `${agentName} task ${status === "running" ? "running" : "completed"}`, status);
+  };
+
+  const showMockClaudeTask = () => {
+    const id = "mock-claude-session";
+    const previous = tasks.find((task) => task.id === id);
+    const status = previous?.status === "running" ? "needs_input"
+      : previous?.status === "needs_input" ? "done" : "running";
+    const title = status === "running" ? "Claude is working"
+      : status === "done" ? "Claude task completed" : "Claude is waiting for you";
+    setTasks((current) => upsertTask(current, {
+      id,
+      source: "claude",
+      name: "Claude · mock-claude",
+      status,
+      title,
+      progress: status === "done" ? 1 : 0.6,
+      startedAt: previous?.startedAt ?? Date.now(),
+    }));
+    showPeek("ai", "Claude", title, status);
+  };
+
+  const showMockExternalTask = () => {
+    const id = "mock-external-session";
+    const previous = tasks.find((task) => task.id === id);
+    const status = previous?.status === "running" ? "needs_input"
+      : previous?.status === "needs_input" ? "done" : "running";
+    const title = status === "running" ? "Example Agent task running"
+      : status === "done" ? "Example Agent task completed" : "Example Agent needs your input";
+    setTasks((current) => upsertTask(current, {
+      id,
+      source: "external",
+      name: "Example Agent · mock-external",
+      status,
+      title,
+      progress: status === "done" ? 1 : 0,
+      startedAt: previous?.startedAt ?? Date.now(),
+    }));
+    showPeek("ai", "Example Agent", title, status);
+  };
+
+  const showMockReminderTimer = () => {
+    const now = Date.now();
+    setSettings((current) => ({ ...current, nowPlayingEnabled: true, nowPlayingPeekEnabled: true, reminderTimerEnabled: true }));
+    setReminderTimer({
+      reminders: [{ id: crypto.randomUUID(), title: "Drink water", dueAt: now + 15 * 60_000, notified: false, relative: true, repeatMs: 15 * 60_000 }],
+      timer: { id: crypto.randomUUID(), endsAt: now + 5 * 60_000, remainingMs: null, notified: false },
+    });
+    setClockMs(now);
+    dispatch({ type: "set", state: "idle" });
   };
 
   const showMockAgentBurst = () => {
@@ -967,6 +1262,7 @@ function App() {
       receivedAt,
       createdAt: receivedAt,
       unread: true,
+      app: "WhatsApp",
     }));
     showNextQueuedPeek();
   };
@@ -984,7 +1280,7 @@ function App() {
       meta: { current },
     };
     eventStore.current.upsert(event);
-    setPeekInfo({ source: systemCopy.system, message: systemCopy.criticalAlert, chatMessages: [] });
+    setPeekInfo({ source: systemCopy.system, message: systemCopy.criticalAlert, dotStatus: "crit", chatMessages: [] });
     setPulseSource("system");
     dispatch({ type: "set", state: "alert" });
   };
@@ -1003,7 +1299,7 @@ function App() {
       actionNonce: "mock-nonce",
     };
     eventStore.current.upsert(event);
-    setPeekInfo({ source: "Codex", message: event.title, chatMessages: [], actionEvent: event });
+    setPeekInfo({ source: "Codex", message: event.title, dotStatus: "needs_input", chatMessages: [], actionEvent: event });
     setPulseSource("codex");
     dispatch({ type: "set", state: "alert" });
   };
@@ -1012,6 +1308,23 @@ function App() {
     setMessages((current) => current.map((message) => ({ ...message, unread: false })));
     setPulseSource(null);
     dispatch({ type: "set", state: "idle" });
+  };
+
+  const clearAllWhatsAppMessages = (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    const ids = new Set(messages.filter((message) => isWhatsAppApp(message.app)).map((message) => message.id));
+    if (ids.size === 0) return;
+    ids.forEach((id) => {
+      eventStore.current.dismiss(id);
+      const timer = exitingMessageTimers.current.get(id);
+      if (timer !== undefined) window.clearTimeout(timer);
+      exitingMessageTimers.current.delete(id);
+    });
+    activePeekIds.current = activePeekIds.current.filter((id) => !ids.has(id));
+    setMessages((current) => removeWhatsAppMessages(current));
+    setExitingMessages((current) => current.filter((id) => !ids.has(id)));
+    const otherUnreadRemains = messages.some((message) => !ids.has(message.id) && message.unread);
+    if (!otherUnreadRemains) setPulseSource((current) => current === "chat" ? null : current);
   };
 
   const dismissMessage = (id: string) => {
@@ -1046,19 +1359,21 @@ function App() {
   };
 
   const onHudKeyDown = (event: KeyboardEvent<HTMLElement>) => {
-    if (event.key === "Enter" || event.key === " ") {
+    if (event.key === "Escape") {
+      if (hoverLeaveTimer.current !== null) window.clearTimeout(hoverLeaveTimer.current);
+      hoverLeaveTimer.current = null;
+      clickPinned.current = false;
+      hoverExpanded.current = false;
+      dispatch({ type: "set", state: "idle" });
+      return;
+    }
+    if (isHudToggleShortcut(event.key, event.target === event.currentTarget)) {
       event.preventDefault();
       if (hoverLeaveTimer.current !== null) window.clearTimeout(hoverLeaveTimer.current);
       hoverLeaveTimer.current = null;
       clickPinned.current = !isOpen;
       hoverExpanded.current = false;
       dispatch({ type: "set", state: isOpen ? "idle" : "expanded" });
-    } else if (event.key === "Escape") {
-      if (hoverLeaveTimer.current !== null) window.clearTimeout(hoverLeaveTimer.current);
-      hoverLeaveTimer.current = null;
-      clickPinned.current = false;
-      hoverExpanded.current = false;
-      dispatch({ type: "set", state: "idle" });
     }
   };
 
@@ -1146,16 +1461,27 @@ function App() {
         tabIndex={0}
       >
         <div className="hud-content">
-        <div className={`layer dots${settings.nowPlayingEnabled && settings.nowPlayingPeekEnabled && nowPlaying?.playing ? " dots-now-playing" : ""}`}>
-          {settings.nowPlayingEnabled && settings.nowPlayingPeekEnabled && nowPlaying?.playing && (
-            <span className="now-playing-peek" ref={nowPlayingPeekRef} title={`${settingsCopy.nowPlaying} — ${nowPlaying.title}`}>
-              <span className="now-playing-peek-prefix">{settingsCopy.nowPlaying} —</span>
+        <div className={`layer dots${showNowPlayingStrip || visibleTimer ? " dots-with-activity" : ""}`}>
+          {showNowPlayingStrip && nowPlaying && (
+            <span className="now-playing-peek" title={`${settingsCopy.nowPlaying} — ${nowPlaying.title}`}>
+              <span className="now-playing-peek-prefix">{visibleTimer ? settingsCopy.nowPlayingShort : settingsCopy.nowPlaying} —</span>
               <span aria-label={nowPlaying.title} className="now-playing-title-viewport" ref={nowPlayingTitleRef}>
                 <span className={`now-playing-title-track${nowPlayingTitleOverflows ? " is-scrolling" : ""}`}>
-                  <span>{nowPlaying.title}</span>
+                  <span ref={nowPlayingTitleTextRef}>{nowPlaying.title}</span>
                   {nowPlayingTitleOverflows && <span aria-hidden="true">{nowPlaying.title}</span>}
                 </span>
               </span>
+            </span>
+          )}
+          {visibleTimer && (
+            <span
+              className={`activity-peek timer-peek${visibleTimerMs === 0 ? " is-due" : ""}`}
+              title={`${settingsCopy.timer}: ${visibleTimer.remainingMs !== null ? settingsCopy.timerPaused : formatCountdown(visibleTimerMs)}`}
+              aria-label={`${settingsCopy.timer}: ${visibleTimer.remainingMs !== null ? settingsCopy.timerPaused : formatCountdown(visibleTimerMs)}`}
+              aria-live="off"
+            >
+              <b>{settingsCopy.timer}</b>
+              <span>{formatCountdown(visibleTimerMs)}</span>
             </span>
           )}
           <Dot
@@ -1173,7 +1499,7 @@ function App() {
               <div className="peek-group-heading"><b>{settingsCopy.groupedUpdates((peekInfo.groupEventIds ?? []).length)}</b></div>
               <div className="peek-agent-list">
               {peekInfo.groupEvents?.map((event) => {
-                const label = event.source === "ai" ? agentDisplayName(event.agent)
+                const label = event.source === "ai" ? agentDisplayName(event.agent, event.meta)
                   : event.source === "system" ? systemCopy.system
                     : `${typeof event.meta?.app === "string" ? event.meta.app : "Chat"} · ${typeof event.meta?.sender === "string" ? event.meta.sender : event.title}`;
                 const status: DotStatus = event.status === "error" || event.status === "needs_input"
@@ -1201,7 +1527,7 @@ function App() {
                     if (isTauri()) void invoke("open_whatsapp").catch((error: unknown) => console.warn("Could not open WhatsApp", error));
                   }} type="button">{settingsCopy.openWhatsApp}</button>}
                 </div>
-              ) : <><Dot status={pulseSource === "system" ? systemStatus : pulseSource === "chat" ? "done" : aiStatus} /><b>{peekInfo.source}</b><span>{peekInfo.message}</span></>}
+              ) : <><Dot status={peekInfo.dotStatus} /><b>{peekInfo.source}</b><span>{peekInfo.message}</span></>}
             </>
           )}
           {peekInfo.actionEvent?.actionNonce && (
@@ -1254,127 +1580,194 @@ function App() {
           {settingsOpen ? (
             <>
               <div className="settings-heading">
-                <h4>{settingsCopy.title}</h4>
-                <button aria-label={settingsCopy.close} onClick={(event) => { event.stopPropagation(); setSettingsOpen(false); }}>×</button>
-              </div>
-              <label className="setting-field">
-                <span>{settingsCopy.position}</span>
-                <select value={settings.corner} onChange={(event) => setSettings((current) => ({ ...current, corner: event.target.value as UserSettings["corner"] }))}>
-                  <option value="top-left">{settingsCopy.topLeft}</option>
-                  <option value="top-right">{settingsCopy.topRight}</option>
-                  <option value="bottom-left">{settingsCopy.bottomLeft}</option>
-                  <option value="bottom-right">{settingsCopy.bottomRight}</option>
-                </select>
-              </label>
-              <label className="setting-field">
-                <span>{settingsCopy.screen}</span>
-                <select value={settings.monitorKey ?? ""} onChange={(event) => setSettings((current) => ({ ...current, monitorKey: event.target.value || null }))}>
-                  {monitors.map((monitor) => <option key={monitor.key} value={monitor.key}>{monitor.label} · {monitor.width}×{monitor.height}</option>)}
-                </select>
-              </label>
-              <label className="setting-field">
-                <span>{settingsCopy.peekDuration}</span>
-                <select value={settings.peekDurationSeconds} onChange={(event) => setSettings((current) => ({ ...current, peekDurationSeconds: Number(event.target.value) }))}>
-                  {[2, 3, 4, 5, 6, 8, 10].map((seconds) => <option key={seconds} value={seconds}>{settingsCopy.seconds(seconds)}</option>)}
-                </select>
-              </label>
-              <label className="setting-field">
-                <span>{settingsCopy.monitoredApps}</span>
-                <input value={monitoredAppsText} onChange={(event) => {
-                  const apps = parseMonitoredApps(event.target.value);
-                  const monitoredApps = apps.length > 0 ? apps : defaultSettings.monitoredApps;
-                  setMonitoredAppsText(apps.length > 0 ? event.target.value : monitoredApps.join(", "));
-                  setSettings((current) => ({ ...current, monitoredApps }));
-                }} placeholder={settingsCopy.monitoredAppsPlaceholder} />
-              </label>
-              {isTauri() && (
-                <div className="setting-field" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span>{settingsCopy.notificationPermission}</span>
-                  {notificationPermission === true ? (
-                    <span style={{ fontSize: "12px", opacity: 0.8, color: "#4ade80" }}>{settingsCopy.permissionGranted}</span>
-                  ) : (
-                    <button
-                      className="settings-action-btn"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        requestNotificationPermission();
-                      }}
-                      style={{
-                        padding: "3px 8px",
-                        fontSize: "12px",
-                        borderRadius: "4px",
-                        background: "rgba(255,255,255,0.12)",
-                        border: "1px solid rgba(255,255,255,0.2)",
-                        color: "inherit",
-                        cursor: "pointer",
-                      }}
-                    >
-                      {settingsCopy.grantPermission}
-                    </button>
-                  )}
+                <div className="settings-heading-copy">
+                  <h4>{settingsCopy.title}</h4>
+                  <p>{settingsCopy.subtitle}</p>
                 </div>
-              )}
-              <label className="setting-toggle">
-                <span>{settingsCopy.antigravityHooks}</span>
-                <input type="checkbox" checked={antigravityHooksEnabled} disabled={!isTauri()} onChange={(event) => {
-                  const enabled = event.target.checked;
+                <button aria-label={settingsCopy.close} onClick={(event) => { event.stopPropagation(); setSettingsOpen(false); }} type="button">{settingsCopy.done}</button>
+              </div>
+              <section aria-labelledby="settings-overlay-heading" className="settings-section">
+                <h5 className="settings-section-title" id="settings-overlay-heading">{settingsCopy.overlaySection}</h5>
+                <label className="setting-field">
+                  <span>{settingsCopy.position}</span>
+                  <select value={settings.corner} onChange={(event) => setSettings((current) => ({ ...current, corner: event.target.value as UserSettings["corner"] }))}>
+                    <option value="top-left">{settingsCopy.topLeft}</option>
+                    <option value="top-right">{settingsCopy.topRight}</option>
+                    <option value="bottom-left">{settingsCopy.bottomLeft}</option>
+                    <option value="bottom-right">{settingsCopy.bottomRight}</option>
+                  </select>
+                </label>
+                <label className="setting-field">
+                  <span>{settingsCopy.screen}</span>
+                  <select value={settings.monitorKey ?? ""} onChange={(event) => setSettings((current) => ({ ...current, monitorKey: event.target.value || null }))}>
+                    {monitors.map((monitor) => <option key={monitor.key} value={monitor.key}>{monitor.label} · {monitor.width}×{monitor.height}</option>)}
+                  </select>
+                </label>
+                <label className="setting-field">
+                  <span>{settingsCopy.peekDuration}</span>
+                  <select value={settings.peekDurationSeconds} onChange={(event) => setSettings((current) => ({ ...current, peekDurationSeconds: Number(event.target.value) }))}>
+                    {[2, 3, 4, 5, 6, 8, 10].map((seconds) => <option key={seconds} value={seconds}>{settingsCopy.seconds(seconds)}</option>)}
+                  </select>
+                </label>
+              </section>
+              <section aria-labelledby="settings-notifications-heading" className="settings-section">
+                <h5 className="settings-section-title" id="settings-notifications-heading">{settingsCopy.notificationsSection}</h5>
+                <label className="setting-field">
+                  <span>{settingsCopy.monitoredApps}</span>
+                  <input aria-label={settingsCopy.monitoredApps} value={monitoredAppsText} onChange={(event) => {
+                    const apps = parseMonitoredApps(event.target.value);
+                    const monitoredApps = apps.length > 0 ? apps : defaultSettings.monitoredApps;
+                    setMonitoredAppsText(apps.length > 0 ? event.target.value : monitoredApps.join(", "));
+                    setSettings((current) => ({ ...current, monitoredApps }));
+                  }} placeholder={settingsCopy.monitoredAppsPlaceholder} />
+                  <small className="setting-field-hint">{settingsCopy.monitoredAppsHint}</small>
+                </label>
+                {isTauri() && (
+                  <div className="setting-inline-status">
+                    <span>{settingsCopy.notificationPermission}</span>
+                    {notificationPermission === true ? (
+                      <span className="setting-permission-granted">{settingsCopy.permissionGranted}</span>
+                    ) : (
+                      <button className="settings-action-btn" onClick={(event) => {
+                        event.stopPropagation();
+                        requestNotificationPermission();
+                      }} type="button">{settingsCopy.grantPermission}</button>
+                    )}
+                  </div>
+                )}
+                <SettingsSwitch label={settingsCopy.whatsappNotifications} checked={settings.whatsappNotificationsEnabled} onChange={(enabled) => {
+                  setSettings((current) => ({ ...current, whatsappNotificationsEnabled: enabled }));
+                }} />
+                <SettingsSwitch label={settingsCopy.whatsappCard} checked={settings.whatsappCardEnabled} onChange={(enabled) => {
+                  setSettings((current) => ({ ...current, whatsappCardEnabled: enabled }));
+                }} />
+                <SettingsSwitch label={settingsCopy.allowDuringFullscreen} checked={settings.allowDuringFullscreen} onChange={(enabled) => {
+                  setSettings((current) => ({ ...current, allowDuringFullscreen: enabled }));
+                }} />
+              </section>
+              <section aria-labelledby="settings-integrations-heading" className="settings-section">
+                <h5 className="settings-section-title" id="settings-integrations-heading">{settingsCopy.integrationsSection}</h5>
+                <SettingsSwitch label={settingsCopy.codexIntegration} checked={settings.codexEnabled} onChange={(enabled) => {
+                  setSettings((current) => ({ ...current, codexEnabled: enabled }));
+                }} />
+                <SettingsSwitch label={settingsCopy.antigravityHooks} checked={antigravityHooksEnabled} disabled={!isTauri()} onChange={(enabled) => {
                   void invoke<boolean>("set_antigravity_hooks_enabled", { enabled })
                     .then(setAntigravityHooksEnabled)
                     .catch((error: unknown) => console.warn("Could not update Antigravity hooks", error));
                 }} />
-              </label>
-              <label className="setting-toggle">
-                <span>{settingsCopy.nowPlaying}</span>
-                <input type="checkbox" checked={settings.nowPlayingEnabled} onChange={(event) => {
-                  setSettings((current) => ({ ...current, nowPlayingEnabled: event.target.checked, nowPlayingPeekEnabled: event.target.checked ? current.nowPlayingPeekEnabled : false }));
+                <SettingsSwitch label={settingsCopy.claudeHooks} checked={claudeHooksEnabled} disabled={!isTauri()} onChange={(enabled) => {
+                  void invoke<boolean>("set_claude_hooks_enabled", { enabled })
+                    .then(setClaudeHooksEnabled)
+                    .catch((error: unknown) => console.warn("Could not update Claude hooks", error));
                 }} />
-              </label>
-              {settings.nowPlayingEnabled && (
-                <label className="setting-toggle">
-                  <span>{settingsCopy.nowPlayingBrowserMedia}</span>
-                  <input type="checkbox" checked={settings.nowPlayingBrowserMediaEnabled} onChange={(event) => {
-                    setSettings((current) => ({ ...current, nowPlayingBrowserMediaEnabled: event.target.checked }));
+              </section>
+              <section aria-labelledby="settings-features-heading" className="settings-section">
+                <h5 className="settings-section-title" id="settings-features-heading">{settingsCopy.featuresSection}</h5>
+                <SettingsSwitch label={settingsCopy.nowPlaying} checked={settings.nowPlayingEnabled} onChange={(enabled) => {
+                  setSettings((current) => ({ ...current, nowPlayingEnabled: enabled, nowPlayingPeekEnabled: enabled ? current.nowPlayingPeekEnabled : false }));
+                }} />
+                {settings.nowPlayingEnabled && (
+                  <SettingsSwitch label={settingsCopy.nowPlayingBrowserMedia} checked={settings.nowPlayingBrowserMediaEnabled} onChange={(enabled) => {
+                    setSettings((current) => ({ ...current, nowPlayingBrowserMediaEnabled: enabled }));
                   }} />
-                </label>
-              )}
-              {settings.nowPlayingEnabled && (
-                <label className="setting-toggle">
-                  <span>{settingsCopy.nowPlayingPeek}</span>
-                  <input type="checkbox" checked={settings.nowPlayingPeekEnabled} onChange={(event) => {
-                    setSettings((current) => ({ ...current, nowPlayingPeekEnabled: event.target.checked }));
+                )}
+                {settings.nowPlayingEnabled && (
+                  <SettingsSwitch label={settingsCopy.nowPlayingPeek} checked={settings.nowPlayingPeekEnabled} onChange={(enabled) => {
+                    setSettings((current) => ({ ...current, nowPlayingPeekEnabled: enabled }));
                   }} />
-                </label>
-              )}
-              <label className="setting-toggle">
-                <span>{settingsCopy.whatsappNotifications}</span>
-                <input type="checkbox" checked={settings.whatsappNotificationsEnabled} onChange={(event) => {
-                  setSettings((current) => ({ ...current, whatsappNotificationsEnabled: event.target.checked }));
+                )}
+                <SettingsSwitch label={settingsCopy.reminderTimer} checked={settings.reminderTimerEnabled} onChange={(enabled) => {
+                  setSettings((current) => ({ ...current, reminderTimerEnabled: enabled }));
+                  setActivityError("");
+                  setClockMs(Date.now());
                 }} />
-              </label>
-              <label className="setting-toggle">
-                <span>{settingsCopy.whatsappCard}</span>
-                <input type="checkbox" checked={settings.whatsappCardEnabled} onChange={(event) => {
-                  setSettings((current) => ({ ...current, whatsappCardEnabled: event.target.checked }));
-                }} />
-              </label>
-              <label className="setting-toggle">
-                <span>{settingsCopy.allowDuringFullscreen}</span>
-                <input type="checkbox" checked={settings.allowDuringFullscreen} onChange={(event) => {
-                  setSettings((current) => ({ ...current, allowDuringFullscreen: event.target.checked }));
-                }} />
-              </label>
-              <label className="setting-toggle">
-                <span>{settingsCopy.autoStart}</span>
-                <input type="checkbox" checked={settings.autoStart} disabled={!autoStartReady || !isTauri()} onChange={(event) => {
-                  const enabled = event.target.checked;
+                {settings.reminderTimerEnabled && (
+                  <div className="reminder-timer-settings">
+                    <h5>{settingsCopy.reminder}</h5>
+                    <form onSubmit={(event) => { event.preventDefault(); addReminder(); }}>
+                      <input
+                        aria-label={settingsCopy.reminderTitle}
+                        maxLength={80}
+                        placeholder={settingsCopy.reminderTitle}
+                        value={reminderTitle}
+                        onChange={(event) => setReminderTitle(event.target.value)}
+                      />
+                      <label className="reminder-schedule-mode">
+                        <span>{settingsCopy.reminderSchedule}</span>
+                        <select value={reminderSchedule} onChange={(event) => setReminderSchedule(event.target.value as ReminderSchedule)}>
+                          <option value="after">{settingsCopy.reminderDurationMode}</option>
+                          <option value="at">{settingsCopy.reminderDateMode}</option>
+                        </select>
+                      </label>
+                      {reminderSchedule === "after" ? (
+                        <>
+                          <label>
+                            <span>{settingsCopy.duration}</span>
+                            <div className="duration-field">
+                              <input aria-label={settingsCopy.durationAmount} type="number" min="1" max={reminderDurationUnit === "seconds" ? 86_400 : reminderDurationUnit === "minutes" ? 1_440 : 24} step="1" value={reminderDuration} onChange={(event) => setReminderDuration(event.target.value)} />
+                              <select aria-label={settingsCopy.durationUnit} value={reminderDurationUnit} onChange={(event) => setReminderDurationUnit(event.target.value as DurationUnit)}>
+                                <option value="seconds">{settingsCopy.durationSeconds}</option>
+                                <option value="minutes">{settingsCopy.durationMinutes}</option>
+                                <option value="hours">{settingsCopy.durationHours}</option>
+                              </select>
+                            </div>
+                          </label>
+                          <SettingsSwitch className="reminder-repeat-toggle" label={settingsCopy.repeatReminder} checked={repeatReminder} onChange={setRepeatReminder} />
+                        </>
+                      ) : (
+                        <label className="reminder-date-field">
+                          <span>{settingsCopy.reminderDateTime}</span>
+                          <input type="datetime-local" value={reminderDateTime} onChange={(event) => setReminderDateTime(event.target.value)} />
+                        </label>
+                      )}
+                      <button type="submit">{settingsCopy.addReminder}</button>
+                    </form>
+                    {reminderTimer.reminders.length === 0
+                      ? <p className="activity-empty">{settingsCopy.noReminders}</p>
+                      : <ul className="activity-items">{reminderTimer.reminders.map((reminder) => (
+                        <li key={reminder.id}>
+                          <span><b>{reminder.title}</b><small>{reminderTimingLabel(reminder, clockMs)}</small></span>
+                          <button type="button" aria-label={`${settingsCopy.removeReminder}: ${reminder.title}`} onClick={() => {
+                            setReminderTimer((current) => ({ ...current, reminders: current.reminders.filter((item) => item.id !== reminder.id) }));
+                          }}>×</button>
+                        </li>
+                      ))}</ul>}
+                    <h5>{settingsCopy.timer}</h5>
+                    <form className="timer-form" onSubmit={(event) => { event.preventDefault(); startTimer(); }}>
+                      <label>
+                        <span>{settingsCopy.timerDuration}</span>
+                        <div className="duration-field">
+                          <input aria-label={settingsCopy.durationAmount} type="number" min="1" max={timerDurationUnit === "seconds" ? 86_400 : timerDurationUnit === "minutes" ? 1_440 : 24} step="1" value={timerDuration} onChange={(event) => setTimerDuration(event.target.value)} />
+                          <select aria-label={settingsCopy.durationUnit} value={timerDurationUnit} onChange={(event) => setTimerDurationUnit(event.target.value as DurationUnit)}>
+                            <option value="seconds">{settingsCopy.durationSeconds}</option>
+                            <option value="minutes">{settingsCopy.durationMinutes}</option>
+                            <option value="hours">{settingsCopy.durationHours}</option>
+                          </select>
+                        </div>
+                      </label>
+                      <button type="submit">{settingsCopy.startTimer}</button>
+                    </form>
+                    {visibleTimer ? (
+                      <div className="timer-controls">
+                        <span>{formatCountdown(visibleTimerMs)}{visibleTimer.remainingMs !== null ? ` · ${settingsCopy.timerPaused}` : ""}</span>
+                        {visibleTimerMs > 0 && <button type="button" onClick={toggleTimerPause}>{visibleTimer.remainingMs === null ? settingsCopy.pauseTimer : settingsCopy.resumeTimer}</button>}
+                        <button type="button" onClick={() => setReminderTimer((current) => ({ ...current, timer: null }))}>{settingsCopy.cancelTimer}</button>
+                      </div>
+                    ) : <p className="activity-empty">{settingsCopy.timerNone}</p>}
+                    {activityError && <p className="setting-error" role="alert">{activityError}</p>}
+                  </div>
+                )}
+              </section>
+              <section aria-labelledby="settings-startup-heading" className="settings-section settings-section-last">
+                <h5 className="settings-section-title" id="settings-startup-heading">{settingsCopy.startupSection}</h5>
+                <SettingsSwitch label={settingsCopy.autoStart} checked={settings.autoStart} disabled={!autoStartReady || !isTauri()} onChange={(enabled) => {
                   setSettings((current) => ({ ...current, autoStart: enabled }));
                   if (isTauri()) void invoke("set_auto_start", { enabled }).catch((error: unknown) => {
                     console.warn("Could not update auto-start", error);
                     setSettings((current) => ({ ...current, autoStart: !enabled }));
                   });
                 }} />
-              </label>
-              <button className="settings-done" onClick={(event) => { event.stopPropagation(); setSettingsOpen(false); }}>{settingsCopy.done}</button>
+              </section>
             </>
           ) : (
             <>
@@ -1400,7 +1793,35 @@ function App() {
                   ) : <p className="now-playing-empty">{settingsCopy.noMedia}</p>}
                 </section>
               )}
-              <h4>Chat{unreadCount > 0 ? ` · ${unreadCount} unread` : ""}</h4>
+              {settings.reminderTimerEnabled && (reminderTimer.reminders.length > 0 || reminderTimer.timer) && (
+                <section className="activity-panel" aria-label={settingsCopy.reminderTimer}>
+                  <h4>{settingsCopy.reminderTimer}</h4>
+                  {reminderTimer.reminders.map((reminder) => (
+                    <div className="activity-panel-row" key={reminder.id}>
+                      <span><b>{reminder.title}</b><small>{reminderTimingLabel(reminder, clockMs)}</small></span>
+                      <button type="button" aria-label={`${settingsCopy.removeReminder}: ${reminder.title}`} onClick={(event) => {
+                        event.stopPropagation();
+                        setReminderTimer((current) => ({ ...current, reminders: current.reminders.filter((item) => item.id !== reminder.id) }));
+                      }}>×</button>
+                    </div>
+                  ))}
+                  {visibleTimer && (
+                    <div className="activity-panel-row">
+                      <span><b>{settingsCopy.timer}</b><small>{formatCountdown(visibleTimerMs)}{visibleTimer.remainingMs !== null ? ` · ${settingsCopy.timerPaused}` : ""}</small></span>
+                      {visibleTimerMs > 0 && <button type="button" onClick={(event) => { event.stopPropagation(); toggleTimerPause(); }}>{visibleTimer.remainingMs === null ? settingsCopy.pauseTimer : settingsCopy.resumeTimer}</button>}
+                      <button type="button" onClick={(event) => { event.stopPropagation(); setReminderTimer((current) => ({ ...current, timer: null })); }}>{settingsCopy.cancelTimer}</button>
+                    </div>
+                  )}
+                </section>
+              )}
+              <div className="panel-heading chat-panel-heading">
+                <h4>Chat{unreadCount > 0 ? ` · ${unreadCount} unread` : ""}</h4>
+                {whatsappMessageCount > 0 && (
+                  <button aria-label={settingsCopy.clearAllWhatsAppAccessible} onClick={clearAllWhatsAppMessages} type="button">
+                    {settingsCopy.clearAllWhatsApp}
+                  </button>
+                )}
+              </div>
               {messages.map((message, index) => (
                 <div className={`row message-row${exitingMessages.includes(message.id) ? " row-exit" : ""}`} key={message.id} style={{ "--row-index": index } as CSSProperties}>
                   <div className="avatar whatsapp-avatar" style={{ "--avatar-hue": avatarHue(message.sender) } as CSSProperties}>{initials(message.sender)}</div>
@@ -1442,6 +1863,9 @@ function App() {
           <button onClick={() => showMockAntigravityTask("antigravity-cli")}>Antigravity CLI task</button>
           <button onClick={() => showMockAntigravityTask("antigravity-ide")}>Antigravity IDE task</button>
           <button onClick={() => showMockAntigravityTask("antigravity-app")}>Antigravity App task</button>
+          <button onClick={showMockClaudeTask}>Claude task</button>
+          <button onClick={showMockExternalTask}>{settingsCopy.mockExternalTask}</button>
+          <button onClick={showMockReminderTimer}>{settingsCopy.mockReminderTimer}</button>
           <button onClick={finishTask}>Task completed</button>
           <button onClick={failTask}>Error</button>
           <button onClick={receiveMessage}>Incoming chat</button>

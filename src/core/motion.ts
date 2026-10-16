@@ -7,7 +7,13 @@ export const motionTokens = {
     idle: { width: 64, height: 24, radius: 12 },
     peek: { width: 300, height: 44, radius: 22 },
     expanded: { width: 320, radius: 22 },
-    peekWidth: { minimum: 145, maximum: 276, labelPadding: 84 },
+    activityWidth: {
+      timer: 155,
+      reminder: 225,
+      reminderAndTimer: 275,
+      withNowPlaying: 200,
+      withNowPlayingAndTimer: 250,
+    },
     tallPeek: { multiMessageBase: 56, rowHeight: 32, approval: 72, chat: 76, call: 92 },
   },
   timing: {

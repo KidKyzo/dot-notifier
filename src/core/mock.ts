@@ -2,7 +2,7 @@ export type DemoStatus = "idle" | "running" | "done" | "error" | "needs_input";
 
 export type DemoTask = {
   id: string;
-  source: "codex" | "antigravity-app" | "antigravity-cli" | "antigravity-ide";
+  source: "codex" | "claude" | "antigravity-app" | "antigravity-cli" | "antigravity-ide" | "external";
   name: string;
   status: DemoStatus;
   title: string;
@@ -21,6 +21,7 @@ export type DemoMessage = {
   sender: string;
   body: string;
   unread: boolean;
+  app?: string;
 };
 
 export const initialTasks: DemoTask[] = [
@@ -48,7 +49,7 @@ export const emptyTasks: DemoTask[] = [
 ];
 
 export const initialMessages: DemoMessage[] = [
-  { id: "mock-dimas", receivedAt: Date.now(), createdAt: Date.now(), sender: "Dimas", body: "I approved the pull request.", unread: false },
+  { id: "mock-dimas", receivedAt: Date.now(), createdAt: Date.now(), sender: "Dimas", body: "I approved the pull request.", unread: false, app: "WhatsApp" },
 ];
 
 export const incomingMessages: Array<Pick<DemoMessage, "sender" | "body">> = [

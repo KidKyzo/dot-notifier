@@ -1,0 +1,33 @@
+{
+  "valid": {
+    "id": "e1a0de00-0000-4000-8000-000000000001",
+    "source": "ai",
+    "agent": "external",
+    "sessionId": "Example Agent:session-123",
+    "kind": "task",
+    "status": "running",
+    "title": "Example Agent task running",
+    "meta": { "product": "Example Agent" }
+  },
+  "unknownFields": {
+    "id": "e1a0de00-0000-4000-8000-000000000001",
+    "source": "ai",
+    "agent": "external",
+    "sessionId": "Example Agent:session-123",
+    "kind": "task",
+    "status": "done",
+    "title": "Example Agent task completed",
+    "meta": { "product": "Example Agent", "futureField": true },
+    "extra": "ignored"
+  },
+  "malformed": {
+    "id": "e1a0de00-0000-4000-8000-000000000001",
+    "source": "ai",
+    "agent": "external",
+    "sessionId": "Example Agent:session-123",
+    "kind": "task",
+    "status": "running",
+    "title": "Example Agent task running",
+    "meta": { "product": "\nInjected" }
+  }
+}

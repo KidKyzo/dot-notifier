@@ -1,0 +1,30 @@
+{
+  "valid": {
+    "id": "c1a0de00-0000-4000-8000-000000000001",
+    "source": "ai",
+    "agent": "claude",
+    "sessionId": "claude-session-123",
+    "kind": "task",
+    "status": "done",
+    "title": "Claude task completed"
+  },
+  "unknownFields": {
+    "id": "c1a0de00-0000-4000-8000-000000000002",
+    "source": "ai",
+    "agent": "claude",
+    "sessionId": "claude-session-456",
+    "kind": "task",
+    "status": "needs_input",
+    "title": "Claude is waiting for you",
+    "futureField": true
+  },
+  "malformed": {
+    "id": "not-a-uuid",
+    "source": "ai",
+    "agent": "claude",
+    "sessionId": "claude-session-789",
+    "kind": "task",
+    "status": "waiting",
+    "title": "Claude is waiting for you"
+  }
+}

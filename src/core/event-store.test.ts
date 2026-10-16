@@ -43,6 +43,15 @@ describe("event store", () => {
     expect(store.all().map(({ agent }) => agent)).toEqual(["antigravity-app", "antigravity-ide"]);
   });
 
+  it("upserts one external session without merging different products", () => {
+    const store = new EventStore();
+    store.upsert({ ...event("first", "running"), agent: "external", sessionId: "Product A:shared", meta: { product: "Product A" } });
+    store.upsert({ ...event("second", "done"), agent: "external", sessionId: "Product A:shared", meta: { product: "Product A" } });
+    store.upsert({ ...event("third", "running"), agent: "external", sessionId: "Product B:shared", meta: { product: "Product B" } });
+    expect(store.all()).toHaveLength(2);
+    expect(store.all().map(({ id }) => id)).toEqual(["second", "third"]);
+  });
+
   it("updates a session snapshot and prioritizes errors and needs-input peeks", () => {
     const store = new EventStore();
     store.upsert(event("task-1", "running", "old title"));
