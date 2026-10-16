@@ -1,7 +1,7 @@
 use std::process::Command;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex,
+    Arc, Mutex,
 };
 use std::thread;
 use std::time::Duration;
@@ -16,6 +16,7 @@ mod antigravity_hooks;
 mod antigravity_logs;
 mod approvals;
 mod bus;
+mod claude_hooks;
 mod codex_logs;
 mod focus;
 mod media_controls;
@@ -27,6 +28,7 @@ mod win_notifications;
 struct AppState {
     paused: AtomicBool,
     quiet_mode: AtomicBool,
+    codex_enabled: Arc<AtomicBool>,
     allow_during_fullscreen: std::sync::Arc<AtomicBool>,
     focus_session_active: std::sync::Arc<AtomicBool>,
     system_panel_open: std::sync::Arc<AtomicBool>,
@@ -163,6 +165,21 @@ fn get_antigravity_hooks_enabled(app: tauri::AppHandle) -> Result<bool, String> 
 #[tauri::command]
 fn set_antigravity_hooks_enabled(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
     antigravity_hooks::set_enabled(&app, enabled)
+}
+
+#[tauri::command]
+fn get_claude_hooks_enabled(app: tauri::AppHandle) -> Result<bool, String> {
+    claude_hooks::is_enabled(&app)
+}
+
+#[tauri::command]
+fn set_claude_hooks_enabled(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    claude_hooks::set_enabled(&app, enabled)
+}
+
+#[tauri::command]
+fn set_codex_enabled(state: tauri::State<'_, AppState>, enabled: bool) {
+    state.codex_enabled.store(enabled, Ordering::Release);
 }
 
 fn place_on_work_area(
@@ -818,6 +835,9 @@ pub fn run() {
             dismiss_permission,
             get_antigravity_hooks_enabled,
             set_antigravity_hooks_enabled,
+            get_claude_hooks_enabled,
+            set_claude_hooks_enabled,
+            set_codex_enabled,
             list_monitors,
             set_placement,
             set_auto_start,
@@ -853,7 +873,10 @@ pub fn run() {
                 app.handle().clone(),
                 app.state::<AppState>().system_panel_open.clone(),
             );
-            codex_logs::start(app.handle().clone());
+            codex_logs::start(
+                app.handle().clone(),
+                app.state::<AppState>().codex_enabled.clone(),
+            );
             antigravity_logs::start(app.handle().clone());
             win_notifications::start(app.handle().clone());
             match app.path().app_local_data_dir() {
@@ -862,6 +885,7 @@ pub fn run() {
                         app.handle().clone(),
                         &directory,
                         app.state::<AppState>().approvals.clone(),
+                        app.state::<AppState>().codex_enabled.clone(),
                     ) {
                         eprintln!("Could not start local event bus: {error}");
                     }

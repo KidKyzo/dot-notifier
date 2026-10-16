@@ -1,6 +1,6 @@
 # Dot Notifier
 
-[![Windows](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://www.microsoft.com/windows)
+[![Windows](<https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows>)](https://www.microsoft.com/windows)
 [![Tauri 2](https://img.shields.io/badge/Tauri-v2-FFC131?logo=tauri&logoColor=black)](https://tauri.app/)
 [![React](https://img.shields.io/badge/React-v19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
@@ -26,12 +26,12 @@ Dot Notifier solves this with an ambient **three-dot micro-UI** positioned seaml
 
 ### Overlay States
 
-| State        | Visual Behavior                                                                                                                                               | Trigger                                                                      |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| **Idle**     | Low-opacity, minimal dots sitting cleanly in the screen corner.                                                                                               | Default quiescent state                                                      |
-| **Alert**    | Dot pulses or transitions color (blue = running, green = complete, orange = waiting/needs input, red = error).                                                | New event or state change                                                    |
-| **Peek**     | Morphing glass pill (icon + concise single line) that auto-dismisses after 3–4 seconds. Supports **approval actions** and **grouped multi-event coalescing**. | Incoming chat, task finished, permission prompt, or metric threshold crossed |
-| **Expanded** | Interactive flyout panel with detailed task queues, chat history, media player, and hardware sparklines.                                                      | Hover or click                                                               |
+| State              | Visual Behavior                                                                                                                                                           | Trigger                                                                      |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| **Idle**     | Low-opacity, minimal dots sitting cleanly in the screen corner.                                                                                                           | Default quiescent state                                                      |
+| **Alert**    | Dot pulses or transitions color (blue = running, green = complete, orange = waiting/needs input, red = error).                                                            | New event or state change                                                    |
+| **Peek**     | Morphing glass pill (icon + concise single line) that auto-dismisses after 3–4 seconds. Supports**approval actions** and **grouped multi-event coalescing**. | Incoming chat, task finished, permission prompt, or metric threshold crossed |
+| **Expanded** | Interactive flyout panel with detailed task queues, chat history, media player, and hardware sparklines.                                                                  | Hover or click                                                               |
 
 ---
 
@@ -68,13 +68,13 @@ Dot Notifier solves this with an ambient **three-dot micro-UI** positioned seaml
 
 ## Supported AI Agents
 
-| Agent                       | Integration Mechanism                                           | Capabilities                                                          | Configuration / Location                                  |
-| --------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------- |
-| **Codex CLI**               | Rollout watcher + `notify` hook + `[[hooks.PermissionRequest]]` | Running, Done, Error, Waiting for Input, Interactive Approve / Reject | `~/.codex/config.toml`                                    |
-| **Antigravity 2.0 App**     | Transcript watcher + `PreInvocation` & `Stop` hooks             | Running, Done, Error (observe-only, privacy-first)                    | `~/.gemini/antigravity/brain/`                            |
-| **Antigravity CLI (`agy`)** | Transcript watcher + `PreInvocation` & `Stop` hooks             | Running, Done, Error (observe-only, synchronous hook safe)            | `~/.gemini/config/hooks.json` or `settings.json`          |
-| **Antigravity IDE**         | Transcript watcher + `.agents/hooks.json` / `hooks.json`        | Running, Done, Error, deduplicated by `conversationId`                | `.agents/hooks.json` / `~/.gemini/antigravity-ide/brain/` |
-| **Claude Code**             | Shell hook script (`claude-notify.ps1`)                         | `Stop`, `Notification`, `PermissionRequest`                           | `~/.claude/settings.json`                                 |
+| Agent                               | Integration Mechanism                                              | Capabilities                                                          | Configuration / Location                                      |
+| ----------------------------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------- | ------------------------------------------------------------- |
+| **Codex CLI**                 | Rollout watcher +`notify` hook + `[[hooks.PermissionRequest]]` | Running, Done, Error, Waiting for Input, Interactive Approve / Reject | `~/.codex/config.toml`                                      |
+| **Antigravity 2.0 App**       | Transcript watcher +`PreInvocation` & `Stop` hooks             | Running, Done, Error (observe-only, privacy-first)                    | `~/.gemini/antigravity/brain/`                              |
+| **Antigravity CLI (`agy`)** | Transcript watcher +`PreInvocation` & `Stop` hooks             | Running, Done, Error (observe-only, synchronous hook safe)            | `~/.gemini/config/hooks.json` or `settings.json`          |
+| **Antigravity IDE**           | Transcript watcher +`.agents/hooks.json` / `hooks.json`        | Running, Done, Error, deduplicated by`conversationId`               | `.agents/hooks.json` / `~/.gemini/antigravity-ide/brain/` |
+| **Claude Code**               | Shell hook script (`claude-notify.ps1`)                          | `Stop`, `Notification`, `PermissionRequest`                     | `~/.claude/settings.json`                                   |
 
 ---
 
