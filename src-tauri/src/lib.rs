@@ -58,6 +58,7 @@ struct MonitorOption {
 #[serde(rename_all = "kebab-case")]
 enum Corner {
     TopLeft,
+    TopCenter,
     TopRight,
     BottomLeft,
     BottomRight,
@@ -80,6 +81,19 @@ impl HitArea {
             && x < self.x + self.width + margin
             && y < self.y + self.height + margin
     }
+}
+
+fn cursor_region_transition(
+    was_inside: bool,
+    area: Option<HitArea>,
+    cursor: Option<(f64, f64)>,
+) -> Option<bool> {
+    let margin = if was_inside { 8.0 } else { 4.0 };
+    let is_inside = area
+        .zip(cursor)
+        .map(|(area, (x, y))| area.contains_with_margin(x, y, margin))
+        .unwrap_or(false);
+    (is_inside != was_inside).then_some(is_inside)
 }
 
 #[tauri::command]
@@ -221,10 +235,10 @@ fn position_for(
 ) -> (i32, i32) {
     let (left, top, area_width, area_height) = area;
     let (width, height) = window_size;
-    let x = if matches!(corner, Corner::TopLeft | Corner::BottomLeft) {
-        left + margin
-    } else {
-        left + area_width as i32 - width as i32 - margin
+    let x = match corner {
+        Corner::TopLeft | Corner::BottomLeft => left + margin,
+        Corner::TopCenter => left + (area_width as i32 - width as i32) / 2,
+        Corner::TopRight | Corner::BottomRight => left + area_width as i32 - width as i32 - margin,
     };
     let y = if matches!(corner, Corner::BottomLeft | Corner::BottomRight) {
         top + area_height as i32 - height as i32 - margin
@@ -278,7 +292,7 @@ fn set_auto_start(enabled: bool) -> Result<(), String> {
         let mut command = Command::new("reg.exe");
         if enabled {
             let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-            let value = format!("\"{}\" --hidden", executable.display());
+            let value = format!("\"{}\"", executable.display());
             command.args([
                 "add",
                 r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
@@ -317,10 +331,13 @@ fn set_auto_start(enabled: bool) -> Result<(), String> {
 }
 
 fn auto_start_command_matches(registry_output: &str, executable: &str) -> bool {
-    let expected = format!("\"{executable}\" --hidden");
+    let expected = format!("\"{executable}\"");
+    let legacy = format!("{expected} --hidden");
     registry_output.lines().any(|line| {
-        line.split_once("REG_SZ")
-            .is_some_and(|(_, command)| command.trim().eq_ignore_ascii_case(&expected))
+        line.split_once("REG_SZ").is_some_and(|(_, command)| {
+            let command = command.trim();
+            command.eq_ignore_ascii_case(&expected) || command.eq_ignore_ascii_case(&legacy)
+        })
     })
 }
 
@@ -498,24 +515,29 @@ fn start_cursor_poll(window: WebviewWindow) {
         loop {
             let current_state = app.state::<AppState>();
             let area = current_state.hit_area.lock().ok().and_then(|area| *area);
-            let margin = if inside { 8.0 } else { 4.0 };
-            let next_inside = area
-                .and_then(|area| {
-                    let cursor = global_cursor_position()?;
-                    let origin = window.outer_position().ok()?;
-                    let scale = window.scale_factor().ok()?;
-                    let local_x = (cursor.0 - f64::from(origin.x)) / scale;
-                    let local_y = (cursor.1 - f64::from(origin.y)) / scale;
-                    Some(area.contains_with_margin(local_x, local_y, margin))
-                })
-                .unwrap_or(false);
-            inside = next_inside;
-            let ignore = !next_inside;
+            let cursor = area.and_then(|_| {
+                let cursor = global_cursor_position()?;
+                let origin = window.outer_position().ok()?;
+                let scale = window.scale_factor().ok()?;
+                let local_x = (cursor.0 - f64::from(origin.x)) / scale;
+                let local_y = (cursor.1 - f64::from(origin.y)) / scale;
+                Some((local_x, local_y))
+            });
+            let transition = cursor_region_transition(inside, area, cursor);
+            if let Some(next_inside) = transition {
+                inside = next_inside;
+            }
+            let ignore = !inside;
             if last_ignore != Some(ignore) {
                 if let Err(error) = window.set_ignore_cursor_events(ignore) {
                     eprintln!("Could not update overlay click-through state: {error}");
                 }
                 last_ignore = Some(ignore);
+            }
+            if let Some(hovered) = transition {
+                if let Err(error) = app.emit("overlay-hover-region", hovered) {
+                    eprintln!("Could not update overlay hover state: {error}");
+                }
             }
             thread::sleep(Duration::from_millis(60));
         }
@@ -820,7 +842,6 @@ pub fn run() {
             return;
         }
     };
-    let hidden_start = std::env::args_os().any(|argument| argument == "--hidden");
     tauri::Builder::default()
         .manage(AppState::default())
         .plugin(tauri_plugin_opener::init())
@@ -913,9 +934,7 @@ pub fn run() {
                     }
                 });
                 start_cursor_poll(window.clone());
-                if !hidden_start {
-                    let _ = window.show();
-                }
+                let _ = window.show();
             }
             setup_tray(app.handle())?;
             Ok(())
@@ -926,21 +945,24 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{auto_start_command_matches, position_for, tray_icon_size, Corner, HitArea};
+    use super::{
+        auto_start_command_matches, cursor_region_transition, position_for, tray_icon_size, Corner,
+        HitArea,
+    };
 
     #[test]
-    fn auto_start_rejects_stale_or_unhidden_registry_commands() {
+    fn auto_start_accepts_current_and_legacy_registry_commands() {
         let executable = r"D:\Dot Notifier\dot-notifier.exe";
         assert!(auto_start_command_matches(
             "DotNotifier    REG_SZ    \"D:\\Dot Notifier\\dot-notifier.exe\" --hidden",
             executable,
         ));
-        assert!(!auto_start_command_matches(
-            "DotNotifier    REG_SZ    \"C:\\Program Files\\Dot Notifier\\dot-notifier.exe\"",
+        assert!(auto_start_command_matches(
+            "DotNotifier    REG_SZ    \"D:\\Dot Notifier\\dot-notifier.exe\"",
             executable,
         ));
         assert!(!auto_start_command_matches(
-            "DotNotifier    REG_SZ    \"D:\\Dot Notifier\\dot-notifier.exe\"",
+            "DotNotifier    REG_SZ    \"C:\\Program Files\\Dot Notifier\\dot-notifier.exe\"",
             executable,
         ));
     }
@@ -984,11 +1006,35 @@ mod tests {
     }
 
     #[test]
+    fn cursor_region_transitions_report_hover_edges() {
+        let area = HitArea {
+            x: 10.0,
+            y: 20.0,
+            width: 40.0,
+            height: 30.0,
+        };
+
+        assert_eq!(
+            cursor_region_transition(false, Some(area), Some((20.0, 30.0))),
+            Some(true)
+        );
+        assert_eq!(
+            cursor_region_transition(true, Some(area), Some((2.5, 25.0))),
+            None
+        );
+        assert_eq!(
+            cursor_region_transition(true, Some(area), Some((1.5, 25.0))),
+            Some(false)
+        );
+    }
+
+    #[test]
     fn placement_uses_each_work_area_corner() {
         let area = (100, 200, 1_000, 800);
         let size = (380, 500);
         assert_eq!(position_for(area, size, 20, &Corner::TopLeft), (120, 220));
         assert_eq!(position_for(area, size, 20, &Corner::TopRight), (700, 220));
+        assert_eq!(position_for(area, size, 20, &Corner::TopCenter), (410, 220));
         assert_eq!(
             position_for(area, size, 20, &Corner::BottomLeft),
             (120, 480)

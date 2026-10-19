@@ -3,5 +3,9 @@
   "failed": "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"error\":{\"message\":\"private failure detail\"}}}",
   "malformed": "{not json",
   "message": "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"private transcript text\"}}",
+  "toolCall": "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"apply_patch\",\"arguments\":\"private file path and patch\"}}",
+  "unknownTool": "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"name\":\"exec\",\"input\":\"private tool input\"}}",
+  "reasoning": "{\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\",\"summary\":\"private reasoning\"}}",
+  "assistantMessage": "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"private reply\"}}",
   "unknownFields": "{\"type\":\"event_msg\",\"unexpected\":\"ignored\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-1\",\"last_agent_message\":\"private transcript text\",\"extra\":true}}"
 }

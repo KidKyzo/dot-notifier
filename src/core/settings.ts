@@ -3,8 +3,9 @@ export type UserSettings = {
   monitoredApps: string[];
   autoStart: boolean;
   codexEnabled: boolean;
-  corner: "top-left" | "top-right" | "bottom-left" | "bottom-right";
+  corner: "top-left" | "top-center" | "top-right" | "bottom-left" | "bottom-right";
   monitorKey: string | null;
+  pillMode: PillMode;
   nowPlayingEnabled: boolean;
   nowPlayingPeekEnabled: boolean;
   nowPlayingBrowserMediaEnabled: boolean;
@@ -14,6 +15,32 @@ export type UserSettings = {
   allowDuringFullscreen: boolean;
 };
 
+export type PillMode = "all" | "music" | "agents" | "timer";
+export const pillPresentation = (mode: PillMode, noticeActive: boolean): { mode: PillMode; showNotice: boolean } => ({
+  mode,
+  showNotice: noticeActive && (mode === "music" || mode === "agents"),
+});
+export type AgentIntegration = "codex" | "claude" | "antigravity";
+
+export type AgentIntegrationState = Record<AgentIntegration, boolean>;
+
+export const getAgentIntegration = (agent: string | undefined): AgentIntegration | undefined => {
+  if (agent === "codex" || agent === "claude") return agent;
+  if (agent?.startsWith("antigravity-")) return "antigravity";
+  return undefined;
+};
+
+export const isAgentIntegrationEnabled = (
+  agent: string | undefined,
+  integrations: AgentIntegrationState,
+): boolean => {
+  const integration = getAgentIntegration(agent);
+  return integration === undefined || integrations[integration];
+};
+
+export const shouldExpandPillOnHover = (mode: PillMode): boolean =>
+  mode === "all" || mode === "music" || mode === "agents" || mode === "timer";
+
 export const defaultSettings: UserSettings = {
   peekDurationSeconds: 4,
   monitoredApps: ["WhatsApp"],
@@ -21,6 +48,7 @@ export const defaultSettings: UserSettings = {
   codexEnabled: true,
   corner: "top-right",
   monitorKey: null,
+  pillMode: "all",
   nowPlayingEnabled: false,
   nowPlayingPeekEnabled: false,
   nowPlayingBrowserMediaEnabled: false,
@@ -52,11 +80,15 @@ export const loadSettings = (storage: Pick<Storage, "getItem">): UserSettings =>
       monitoredApps: storedApps.length > 0 ? storedApps : defaultSettings.monitoredApps,
       autoStart: typeof record.autoStart === "boolean" ? record.autoStart : defaultSettings.autoStart,
       codexEnabled: typeof record.codexEnabled === "boolean" ? record.codexEnabled : defaultSettings.codexEnabled,
-      corner: record.corner === "top-left" || record.corner === "top-right"
+      corner: record.corner === "top-left" || record.corner === "top-center" || record.corner === "top-right"
         || record.corner === "bottom-left" || record.corner === "bottom-right"
         ? record.corner
         : defaultSettings.corner,
       monitorKey: typeof record.monitorKey === "string" ? record.monitorKey : defaultSettings.monitorKey,
+      pillMode: record.pillMode === "music" || record.pillMode === "agents"
+        || record.pillMode === "timer"
+        ? record.pillMode
+        : defaultSettings.pillMode,
       nowPlayingEnabled: typeof record.nowPlayingEnabled === "boolean" ? record.nowPlayingEnabled : false,
       nowPlayingPeekEnabled: typeof record.nowPlayingPeekEnabled === "boolean" ? record.nowPlayingPeekEnabled : false,
       nowPlayingBrowserMediaEnabled: typeof record.nowPlayingBrowserMediaEnabled === "boolean"

@@ -2,6 +2,28 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MediaAction {
+    Play,
+    Pause,
+    Previous,
+    Next,
+}
+
+#[cfg(any(windows, test))]
+impl MediaAction {
+    fn parse(action: &str) -> Option<Self> {
+        match action {
+            "play" => Some(Self::Play),
+            "pause" => Some(Self::Pause),
+            "previous" => Some(Self::Previous),
+            "next" => Some(Self::Next),
+            _ => None,
+        }
+    }
+}
+
 fn is_supported_music_source(app_user_model_id: &str, allow_browser_media: bool) -> bool {
     let source = app_user_model_id
         .to_ascii_lowercase()
@@ -29,6 +51,7 @@ pub struct NowPlaying {
     pub title: String,
     pub artist: String,
     pub playing: bool,
+    pub position_seconds: u64,
     pub cover_data_url: Option<String>,
 }
 
@@ -52,6 +75,12 @@ pub fn current(allow_browser_media: bool) -> Option<NowPlaying> {
         .ok()
         .and_then(|info| info.PlaybackStatus().ok())
         .is_some_and(|status| status == PlaybackStatus::Playing);
+    let position_seconds = session
+        .GetTimelineProperties()
+        .ok()
+        .and_then(|timeline| timeline.Position().ok())
+        .map(|position| (position.Duration / 10_000_000).max(0) as u64)
+        .unwrap_or_default();
     static LAST_TRACK: OnceLock<Mutex<Option<NowPlaying>>> = OnceLock::new();
     let cache = LAST_TRACK.get_or_init(|| Mutex::new(None));
     if let Ok(last_track) = cache.lock() {
@@ -61,6 +90,7 @@ pub fn current(allow_browser_media: bool) -> Option<NowPlaying> {
         {
             return Some(NowPlaying {
                 playing,
+                position_seconds,
                 ..previous.clone()
             });
         }
@@ -89,6 +119,7 @@ pub fn current(allow_browser_media: bool) -> Option<NowPlaying> {
         title,
         artist,
         playing,
+        position_seconds,
         cover_data_url,
     };
     if let Ok(mut last_track) = cache.lock() {
@@ -112,11 +143,13 @@ pub fn control(action: &str, allow_browser_media: bool) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let session = supported_music_session(&manager, allow_browser_media)
         .ok_or_else(|| "No supported music app is available".to_owned())?;
-    let operation = match action {
-        "play" => session.TryPlayAsync(),
-        "pause" => session.TryPauseAsync(),
-        "next" => session.TrySkipNextAsync(),
-        _ => return Err("Unknown media action".into()),
+    let media_action =
+        MediaAction::parse(action).ok_or_else(|| "Unknown media action".to_owned())?;
+    let operation = match media_action {
+        MediaAction::Play => session.TryPlayAsync(),
+        MediaAction::Pause => session.TryPauseAsync(),
+        MediaAction::Previous => session.TrySkipPreviousAsync(),
+        MediaAction::Next => session.TrySkipNextAsync(),
     }
     .map_err(|error| error.to_string())?;
     operation
@@ -201,7 +234,16 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::base64;
+    use super::{base64, MediaAction};
+
+    #[test]
+    fn parses_supported_playback_actions() {
+        assert_eq!(MediaAction::parse("play"), Some(MediaAction::Play));
+        assert_eq!(MediaAction::parse("pause"), Some(MediaAction::Pause));
+        assert_eq!(MediaAction::parse("previous"), Some(MediaAction::Previous));
+        assert_eq!(MediaAction::parse("next"), Some(MediaAction::Next));
+        assert_eq!(MediaAction::parse("stop"), None);
+    }
 
     #[test]
     fn encodes_thumbnail_bytes_as_base64() {

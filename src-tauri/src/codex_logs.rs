@@ -44,6 +44,8 @@ struct RolloutLine {
 struct RolloutPayload {
     #[serde(rename = "type")]
     event_type: Option<String>,
+    name: Option<String>,
+    role: Option<String>,
     #[serde(default)]
     error: Option<IgnoredAny>,
 }
@@ -128,8 +130,12 @@ fn watch_sessions(app: AppHandle, codex_enabled: Arc<AtomicBool>) {
                         &thread_id,
                         LogUpdate {
                             state: TaskState::Running,
-                            title: "Codex task running",
-                            started_at: latest.started_at.clone(),
+                            title: latest.title,
+                            started_at: updates.iter().rev().find_map(|update| {
+                                (update.state == TaskState::Running)
+                                    .then(|| update.started_at.clone())
+                                    .flatten()
+                            }),
                         },
                     );
                 }
@@ -305,15 +311,28 @@ fn read_updates(path: &Path, offset: u64, length: u64) -> Vec<LogUpdate> {
 
 fn parse_rollout_line(line: &str) -> Option<LogUpdate> {
     let record: RolloutLine = serde_json::from_str(line).ok()?;
+    let started_at = record.timestamp;
+    let payload = record.payload?;
+    if record.record_type == "response_item" {
+        let title = match payload.event_type.as_deref()? {
+            "function_call" | "custom_tool_call" => activity_title(payload.name.as_deref()?),
+            "reasoning" => "Thinking",
+            "message" if payload.role.as_deref() == Some("assistant") => "Writing response",
+            _ => return None,
+        };
+        return Some(LogUpdate {
+            state: TaskState::Running,
+            title,
+            started_at: None,
+        });
+    }
     if record.record_type != "event_msg" {
         return None;
     }
-    let started_at = record.timestamp;
-    let payload = record.payload?;
     match payload.event_type.as_deref()? {
         "task_started" => Some(LogUpdate {
             state: TaskState::Running,
-            title: "Codex task running",
+            title: "Starting task",
             started_at,
         }),
         "task_complete" if payload.error.is_some() => Some(LogUpdate {
@@ -327,6 +346,16 @@ fn parse_rollout_line(line: &str) -> Option<LogUpdate> {
             started_at: None,
         }),
         _ => None,
+    }
+}
+
+fn activity_title(name: &str) -> &'static str {
+    match name {
+        "apply_patch" => "Editing code",
+        "exec_command" | "write_stdin" => "Running a command",
+        "view_image" => "Viewing an image",
+        "web__run" => "Researching",
+        _ => "Using tools",
     }
 }
 
@@ -383,7 +412,7 @@ mod tests {
             parse_rollout_line(fixture["started"].as_str().expect("line fixture")),
             Some(LogUpdate {
                 state: TaskState::Running,
-                title: "Codex task running",
+                title: "Starting task",
                 started_at: Some("2026-10-09T12:00:00Z".into()),
             })
         );
@@ -412,6 +441,39 @@ mod tests {
                 .expect("fixture JSON is valid");
         assert!(parse_rollout_line(fixture["malformed"].as_str().expect("line fixture")).is_none());
         assert!(parse_rollout_line(fixture["message"].as_str().expect("line fixture")).is_none());
+    }
+
+    #[test]
+    fn classifies_tool_calls_without_exposing_arguments() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../fixtures/codex-rollout.json"))
+                .expect("fixture JSON is valid");
+        assert_eq!(
+            parse_rollout_line(fixture["toolCall"].as_str().expect("line fixture")),
+            Some(LogUpdate {
+                state: TaskState::Running,
+                title: "Editing code",
+                started_at: None,
+            })
+        );
+        assert_eq!(
+            parse_rollout_line(fixture["unknownTool"].as_str().expect("line fixture")),
+            Some(LogUpdate {
+                state: TaskState::Running,
+                title: "Using tools",
+                started_at: None,
+            })
+        );
+        assert_eq!(
+            parse_rollout_line(fixture["reasoning"].as_str().expect("line fixture"))
+                .map(|update| update.title),
+            Some("Thinking")
+        );
+        assert_eq!(
+            parse_rollout_line(fixture["assistantMessage"].as_str().expect("line fixture"))
+                .map(|update| update.title),
+            Some("Writing response")
+        );
     }
 
     #[test]

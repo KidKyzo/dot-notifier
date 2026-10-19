@@ -10,11 +10,11 @@
 - [ ] Measure native idle CPU/RAM and active morph CPU/RAM; record whether idle stays below 1% CPU and 80 MB RAM.
 - [ ] Verify the overlay stays within the primary monitor work area above the taskbar.
 - [ ] Verify the tray menu can pause notifications, enable quiet mode, open the overlay, and quit.
-- [ ] Verify launch shows no taskbar button or Alt+Tab entry; verify `--hidden` starts without showing the overlay.
+- [ ] Verify launch shows no taskbar button or Alt+Tab entry; verify a legacy `--hidden` auto-start entry still shows the overlay dots after setup.
 - [ ] Verify a second launch opens Settings in the running instance.
 - [ ] Verify the tray icon and aggregate tooltip on Windows 10 and 11, including light and dark taskbars at 100%, 150%, and 200% DPI.
 - [ ] Verify the tray menu opens Settings and the app config folder, and toggles overlay visibility.
-- [ ] Verify each corner choice stays inside the selected monitor's work area above the taskbar.
+- [ ] Verify each overlay position, including top center, stays inside the selected monitor's work area above the taskbar; confirm the pill remains centered while expanding and collapsing.
 - [ ] Verify changing the selected display moves the overlay to that monitor and survives app restart.
 - [ ] Verify peek duration and monitored-app filters persist after app restart.
 - [ ] Verify auto-start adds and removes the current-user Windows login entry.
@@ -32,3 +32,14 @@
 - [ ] Enable Now Playing and verify title, artist, artwork, playback state, and controls for Spotify and Apple Music; then opt into browser media and verify a YouTube Music tab in Chrome/Edge. Confirm browser media is excluded when the opt-in is off.
 - [ ] Schedule a reminder and start a timer, then enable Now Playing. Confirm all active labels fit left of the dots, the pill grows without leaving the work area, due items alert once, and timer time survives app restart and sleep/resume.
 - [ ] Enable WhatsApp style cards and verify sender initials, single-line message preview, incoming call detection, and the Open WhatsApp action with real Windows notifications.
+
+## Timer/reminder motion polish (Extended Phase, F44)
+
+- [ ] Verify liquid progress in All and Timer views, including short timers and long reminder titles, in light and dark themes.
+- [ ] Verify pause freezes liquid motion and dims the fill; resume restores it.
+- [ ] Verify completion sweeps once and text enters without clipping at 100%, 150%, and 200% DPI.
+- [ ] Verify reduced motion disables liquid and completion animations; verify native click-through, hover, and CPU/RAM budgets.
+
+Mock preview verified the timer and reminder pills, pause/resume and cancel controls, a long reminder title, due message, and timer completion state. The latest `pnpm check` passed: 85 frontend and 57 Rust tests. Native Windows checks above remain unverified, including both themes, DPI, click-through, reduced motion, and CPU/RAM budgets.
+
+- [ ] Compare the Music pill against the empty Agents pill at 100%, 150%, and 200% DPI; both should measure 340 × 40 CSS px with no clipped music title or playback position.

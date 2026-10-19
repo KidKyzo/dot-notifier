@@ -37,7 +37,12 @@ struct TranscriptLine {
     #[serde(default)]
     created_at: Option<String>,
     #[serde(default)]
-    tool_calls: Option<Vec<serde_json::Value>>,
+    tool_calls: Option<Vec<ToolCall>>,
+}
+
+#[derive(Deserialize)]
+struct ToolCall {
+    name: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -106,8 +111,12 @@ fn watch_sessions(app: AppHandle) {
                             &conversation_id,
                             LogUpdate {
                                 state: TaskState::Running,
-                                title: format!("Antigravity {} task running", agent_label(agent)),
-                                started_at: latest.started_at.clone(),
+                                title: latest.title.clone(),
+                                started_at: updates.iter().rev().find_map(|update| {
+                                    (update.state == TaskState::Running)
+                                        .then(|| update.started_at.clone())
+                                        .flatten()
+                                }),
                             },
                         );
                     }
@@ -248,7 +257,7 @@ fn parse_transcript_line(line: &str, agent: &str) -> Option<LogUpdate> {
     match record_type {
         "USER_INPUT" => Some(LogUpdate {
             state: TaskState::Running,
-            title: format!("Antigravity {agent_name} task running"),
+            title: "Starting task".into(),
             started_at: record.created_at,
         }),
         "CHECKPOINT" => Some(LogUpdate {
@@ -262,9 +271,16 @@ fn parse_transcript_line(line: &str, agent: &str) -> Option<LogUpdate> {
                 .as_ref()
                 .is_some_and(|calls| !calls.is_empty());
             if has_tools {
+                let activity = record
+                    .tool_calls
+                    .as_ref()
+                    .and_then(|calls| calls.last())
+                    .and_then(|call| call.name.as_deref())
+                    .map(tool_activity)
+                    .unwrap_or("Using tools");
                 Some(LogUpdate {
                     state: TaskState::Running,
-                    title: format!("Antigravity {agent_name} task running"),
+                    title: activity.into(),
                     started_at: None,
                 })
             } else {
@@ -276,19 +292,42 @@ fn parse_transcript_line(line: &str, agent: &str) -> Option<LogUpdate> {
             }
         }
         "RUN_COMMAND"
+        | "CODE_ACTION"
         | "WRITE_TO_FILE"
         | "REPLACE_FILE_CONTENT"
         | "VIEW_FILE"
         | "GREP_SEARCH"
         | "LIST_DIR"
+        | "LIST_DIRECTORY"
         | "CALL_MCP_TOOL"
         | "BROWSER_SUBAGENT"
         | "GENERATE_IMAGE" => Some(LogUpdate {
             state: TaskState::Running,
-            title: format!("Antigravity {agent_name} task running"),
+            title: match record_type {
+                "RUN_COMMAND" => "Running a command",
+                "CODE_ACTION" | "WRITE_TO_FILE" | "REPLACE_FILE_CONTENT" => "Editing code",
+                "VIEW_FILE" | "LIST_DIR" | "LIST_DIRECTORY" => "Reading files",
+                "GREP_SEARCH" => "Searching files",
+                "BROWSER_SUBAGENT" => "Browsing",
+                "GENERATE_IMAGE" => "Creating an image",
+                _ => "Using tools",
+            }
+            .into(),
             started_at: None,
         }),
         _ => None,
+    }
+}
+
+fn tool_activity(name: &str) -> &'static str {
+    match name {
+        "run_command" => "Running a command",
+        "write_to_file" | "replace_file_content" => "Editing code",
+        "view_file" | "list_dir" => "Reading files",
+        "grep_search" => "Searching files",
+        "browser_subagent" => "Browsing",
+        "generate_image" => "Creating an image",
+        _ => "Using tools",
     }
 }
 
@@ -428,7 +467,7 @@ mod tests {
         let line = r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-12T05:40:48Z"}"#;
         let update = parse_transcript_line(line, "antigravity-ide").expect("parsed update");
         assert_eq!(update.state, TaskState::Running);
-        assert_eq!(update.title, "Antigravity IDE task running");
+        assert_eq!(update.title, "Starting task");
         assert_eq!(update.started_at.as_deref(), Some("2026-10-12T05:40:48Z"));
     }
 
@@ -445,7 +484,31 @@ mod tests {
         let line = r#"{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-12T05:40:50Z","tool_calls":[{"name":"view_file"}]}"#;
         let update = parse_transcript_line(line, "antigravity-ide").expect("parsed update");
         assert_eq!(update.state, TaskState::Running);
-        assert_eq!(update.title, "Antigravity IDE task running");
+        assert_eq!(update.title, "Reading files");
+    }
+
+    #[test]
+    fn classifies_tool_records_without_exposing_content() {
+        let read = r#"{"type":"VIEW_FILE","status":"DONE","path":"private/file.txt"}"#;
+        let edit = r#"{"type":"REPLACE_FILE_CONTENT","status":"DONE","content":"private text"}"#;
+        let code_action = r#"{"type":"CODE_ACTION","status":"DONE","content":"private text"}"#;
+        let list = r#"{"type":"LIST_DIRECTORY","status":"DONE","path":"private/path"}"#;
+        assert_eq!(
+            parse_transcript_line(read, "antigravity-ide").map(|item| item.title),
+            Some("Reading files".into())
+        );
+        assert_eq!(
+            parse_transcript_line(edit, "antigravity-ide").map(|item| item.title),
+            Some("Editing code".into())
+        );
+        assert_eq!(
+            parse_transcript_line(code_action, "antigravity-ide").map(|item| item.title),
+            Some("Editing code".into())
+        );
+        assert_eq!(
+            parse_transcript_line(list, "antigravity-ide").map(|item| item.title),
+            Some("Reading files".into())
+        );
     }
 
     #[test]

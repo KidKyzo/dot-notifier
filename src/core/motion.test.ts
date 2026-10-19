@@ -1,13 +1,44 @@
 import { describe, expect, it } from "vitest";
 import {
   advanceSpringAxis,
+  cancelSpringFrame,
   createSpringAxis,
   isSpringAxisSettled,
+  modePillSize,
   motionTokens,
   retargetSpringAxis,
+  showsPillWave,
 } from "./motion";
 
+describe("pill view geometry", () => {
+  it("keeps the Agents pill the same size as Music", () => {
+    expect(modePillSize("agents")).toEqual(modePillSize("music"));
+  });
+});
+
+describe("pill fill motion", () => {
+  it("shows the wave from the first timer frame until the fill is complete", () => {
+    expect(showsPillWave(0)).toBe(true);
+    expect(showsPillWave(0.01)).toBe(true);
+    expect(showsPillWave(0.99)).toBe(true);
+    expect(showsPillWave(1)).toBe(false);
+    expect(showsPillWave(1, "filling")).toBe(true);
+  });
+});
+
 describe("retargetable morph spring", () => {
+  it("clears a canceled frame so a remounted shell can schedule animation again", () => {
+    const shape = { frame: 42, lastFrame: 120, width: retargetSpringAxis(createSpringAxis(64), 300) };
+    const canceled: number[] = [];
+
+    cancelSpringFrame(shape, (frame) => canceled.push(frame));
+
+    expect(canceled).toEqual([42]);
+    expect(shape.frame).toBeNull();
+    expect(shape.lastFrame).toBeNull();
+    expect(shape.width.target).toBe(300);
+  });
+
   it("keeps position and velocity when the target changes", () => {
     const moving = advanceSpringAxis(
       retargetSpringAxis(createSpringAxis(64), 300),
