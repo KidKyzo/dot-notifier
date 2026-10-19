@@ -14,7 +14,7 @@
 - [ ] Verify a second launch opens Settings in the running instance.
 - [ ] Verify the tray icon and aggregate tooltip on Windows 10 and 11, including light and dark taskbars at 100%, 150%, and 200% DPI.
 - [ ] Verify the tray menu opens Settings and the app config folder, and toggles overlay visibility.
-- [ ] Verify each corner choice stays inside the selected monitor's work area above the taskbar.
+- [ ] Verify each overlay position, including top center, stays inside the selected monitor's work area above the taskbar; confirm the pill remains centered while expanding and collapsing.
 - [ ] Verify changing the selected display moves the overlay to that monitor and survives app restart.
 - [ ] Verify peek duration and monitored-app filters persist after app restart.
 - [ ] Verify auto-start adds and removes the current-user Windows login entry.
