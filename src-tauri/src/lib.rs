@@ -278,7 +278,7 @@ fn set_auto_start(enabled: bool) -> Result<(), String> {
         let mut command = Command::new("reg.exe");
         if enabled {
             let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-            let value = format!("\"{}\" --hidden", executable.display());
+            let value = format!("\"{}\"", executable.display());
             command.args([
                 "add",
                 r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
@@ -317,10 +317,13 @@ fn set_auto_start(enabled: bool) -> Result<(), String> {
 }
 
 fn auto_start_command_matches(registry_output: &str, executable: &str) -> bool {
-    let expected = format!("\"{executable}\" --hidden");
+    let expected = format!("\"{executable}\"");
+    let legacy = format!("{expected} --hidden");
     registry_output.lines().any(|line| {
-        line.split_once("REG_SZ")
-            .is_some_and(|(_, command)| command.trim().eq_ignore_ascii_case(&expected))
+        line.split_once("REG_SZ").is_some_and(|(_, command)| {
+            let command = command.trim();
+            command.eq_ignore_ascii_case(&expected) || command.eq_ignore_ascii_case(&legacy)
+        })
     })
 }
 
@@ -820,7 +823,6 @@ pub fn run() {
             return;
         }
     };
-    let hidden_start = std::env::args_os().any(|argument| argument == "--hidden");
     tauri::Builder::default()
         .manage(AppState::default())
         .plugin(tauri_plugin_opener::init())
@@ -913,9 +915,7 @@ pub fn run() {
                     }
                 });
                 start_cursor_poll(window.clone());
-                if !hidden_start {
-                    let _ = window.show();
-                }
+                let _ = window.show();
             }
             setup_tray(app.handle())?;
             Ok(())
@@ -929,18 +929,18 @@ mod tests {
     use super::{auto_start_command_matches, position_for, tray_icon_size, Corner, HitArea};
 
     #[test]
-    fn auto_start_rejects_stale_or_unhidden_registry_commands() {
+    fn auto_start_accepts_current_and_legacy_registry_commands() {
         let executable = r"D:\Dot Notifier\dot-notifier.exe";
         assert!(auto_start_command_matches(
             "DotNotifier    REG_SZ    \"D:\\Dot Notifier\\dot-notifier.exe\" --hidden",
             executable,
         ));
-        assert!(!auto_start_command_matches(
-            "DotNotifier    REG_SZ    \"C:\\Program Files\\Dot Notifier\\dot-notifier.exe\"",
+        assert!(auto_start_command_matches(
+            "DotNotifier    REG_SZ    \"D:\\Dot Notifier\\dot-notifier.exe\"",
             executable,
         ));
         assert!(!auto_start_command_matches(
-            "DotNotifier    REG_SZ    \"D:\\Dot Notifier\\dot-notifier.exe\"",
+            "DotNotifier    REG_SZ    \"C:\\Program Files\\Dot Notifier\\dot-notifier.exe\"",
             executable,
         ));
     }

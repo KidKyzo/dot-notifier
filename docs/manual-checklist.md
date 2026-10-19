@@ -10,7 +10,7 @@
 - [ ] Measure native idle CPU/RAM and active morph CPU/RAM; record whether idle stays below 1% CPU and 80 MB RAM.
 - [ ] Verify the overlay stays within the primary monitor work area above the taskbar.
 - [ ] Verify the tray menu can pause notifications, enable quiet mode, open the overlay, and quit.
-- [ ] Verify launch shows no taskbar button or Alt+Tab entry; verify `--hidden` starts without showing the overlay.
+- [ ] Verify launch shows no taskbar button or Alt+Tab entry; verify a legacy `--hidden` auto-start entry still shows the overlay dots after setup.
 - [ ] Verify a second launch opens Settings in the running instance.
 - [ ] Verify the tray icon and aggregate tooltip on Windows 10 and 11, including light and dark taskbars at 100%, 150%, and 200% DPI.
 - [ ] Verify the tray menu opens Settings and the app config folder, and toggles overlay visibility.

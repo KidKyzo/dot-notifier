@@ -37,7 +37,7 @@ The app starts directly in the system tray. It never shows a main window or a ta
 - F25. **Single instance.** A second launch does not start a new process; it opens Settings in the running instance.
 - F26. **Custom icon set.** One 1024x1024 source (SVG kept in `assets/icon/`) generates the app `.ico` (16, 24, 32, 48, 64, 128, 256), installer icon, and tray icons at 16, 20, 24, 32 px for different DPI. The design must stay legible at 16 px, work on light and dark taskbars (provide light and dark tray variants), and must not reuse any agent vendor's logo.
 - F27. **Tray menu and tooltip.** Menu: show or hide overlay, pause, quiet mode, open Settings, open config folder, quit. The tooltip shows the aggregate status (for example "2 running, 1 waiting"). Optional: a small status color badge on the tray icon.
-- F28. **Auto-start to tray.** Launch on login with a `--hidden` flag so nothing flashes on screen.
+- F28. **Auto-start to tray.** Launch on login with the window initially hidden during setup, then show the overlay dots automatically without flashing a main window.
 - Windows 11 may place a new tray icon in the hidden-icons overflow. Show a one-time first-run hint explaining how to pin it.
 - Set a stable App User Model ID so the app identity and icon are consistent in Windows features that use it.
 
