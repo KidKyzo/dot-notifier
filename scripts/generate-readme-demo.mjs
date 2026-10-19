@@ -9,7 +9,8 @@ const root = resolve(import.meta.dirname, "..");
 const output = join(root, "assets", "demo");
 const profile = join(root, "node_modules", ".cache", "readme-demo-edge");
 const edge = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
-const port = 19273;
+const port = Number(process.env.DOT_DEMO_DEBUG_PORT ?? 51556);
+const mockPort = Number(process.env.DOT_DEMO_PORT ?? 1420);
 const fps = 12;
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
 
@@ -60,13 +61,13 @@ async function main() {
     `--user-data-dir=${profile}`,
     `--remote-debugging-port=${port}`,
     "--window-size=1280,720",
-    "http://127.0.0.1:1420/",
-  ], { stdio: "ignore" });
+    `http://127.0.0.1:${mockPort}/`,
+  ], { stdio: "inherit" });
 
   let cdp;
   try {
     const pages = await waitForJson(`http://127.0.0.1:${port}/json`);
-    const page = pages.find((item) => item.type === "page" && item.url.includes("127.0.0.1:1420"));
+    const page = pages.find((item) => item.type === "page" && item.url.includes(`127.0.0.1:${mockPort}`));
     if (!page) throw new Error("Mock UI page was not found in the local browser");
     cdp = connect(page.webSocketDebuggerUrl);
     await cdp.open();
@@ -80,6 +81,8 @@ async function main() {
       if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
       return result.result.value;
     };
+    await evaluate("localStorage.clear()");
+    await cdp.send("Page.reload", { ignoreCache: true });
     for (let attempt = 0; attempt < 80; attempt += 1) {
       if (await evaluate("Boolean(document.querySelector('.hud') && document.querySelector('.controls'))")) break;
       await delay(100);
@@ -106,7 +109,7 @@ async function main() {
       copy.innerHTML = '<div class="demo-kicker">DOT NOTIFIER</div><div class="demo-title"></div><div class="demo-subtitle"></div>';
       document.body.append(copy);
       const accent = document.createElement('div'); accent.className = 'demo-accent'; document.body.append(accent);
-      const footer = document.createElement('div'); footer.className = 'demo-footer'; footer.textContent = 'WINDOWS 10 / 11  •  LOCAL-FIRST'; document.body.append(footer);
+      const footer = document.createElement('div'); footer.className = 'demo-footer'; footer.textContent = 'MOCK UI  •  WINDOWS 10 / 11'; document.body.append(footer);
     })()`);
 
     const movie = spawn("ffmpeg", [
@@ -126,6 +129,28 @@ async function main() {
       button.click();
     })()`);
     const move = (x, y) => cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+    const pillMode = async (mode) => {
+      await move(1230, 32);
+      await delay(450);
+      await evaluate(`(() => {
+        const button = document.querySelector('.panel-heading button');
+        if (!button) throw new Error('Settings button is unavailable');
+        button.click();
+      })()`);
+      await delay(200);
+      await evaluate(`(() => {
+        const select = document.querySelector('.settings-section select');
+        if (!select) throw new Error('Pill view selector is unavailable');
+        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, ${JSON.stringify(mode)});
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      })()`);
+      await delay(250);
+      await evaluate("document.querySelector('.settings-heading button').click()");
+      await move(700, 600);
+      await delay(350);
+      await click("Reminder + timer + music");
+      await delay(350);
+    };
     const frames = async (count) => {
       for (let index = 0; index < count; index += 1) {
         const start = performance.now();
@@ -135,21 +160,32 @@ async function main() {
       }
     };
 
-    await caption("Stay in flow.", "Three quiet signals for AI tasks, notifications, and system health.");
+    await caption("Stay in flow.", "Three quiet signals for agents, notifications, and system health.");
     await frames(24);
-    await caption("Agents, together.", "Codex and Antigravity updates arrive in one focused peek.");
+    await caption("Updates, together.", "Codex and Antigravity events share one focused peek.");
     await click("Codex + Antigravity at once");
     await frames(36);
-    await caption("See the whole picture.", "Hover to expand live tasks, messages, and performance.");
+    await caption("Follow agent activity.", "Expand the pill for live tasks, messages, and performance.");
     await move(1230, 32);
-    await frames(36);
-    await move(700, 600);
-    await delay(400);
-    await caption("Messages at a glance.", "Stay aware without leaving your work.");
-    await click("Incoming chat");
     await frames(30);
-    await caption("Light on your desktop.", "Local-first, ambient, and there when you need it.");
-    await click("System alert");
+    await move(700, 600);
+    await delay(500);
+    await caption("One pill, four views.", "All combines music, a timer, reminders, and status dots.");
+    await click("Reminder + timer + music");
+    await frames(30);
+    await pillMode("music");
+    await caption("Music stays nearby.", "See the current track and playback position at a glance.");
+    await frames(30);
+    await pillMode("agents");
+    await caption("Focus on agents.", "A dedicated view highlights running work and its activity.");
+    await frames(30);
+    await pillMode("timer");
+    await caption("Keep time in view.", "The timer and next reminder have a dedicated pill.");
+    await frames(30);
+    await caption("Know when it is due.", "Completion and reminder states appear directly in the pill.");
+    await click("Time’s up (mock)");
+    await frames(28);
+    await click("Reminder due (mock)");
     await frames(30);
 
     movie.stdin.end();

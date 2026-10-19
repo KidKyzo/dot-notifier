@@ -10,7 +10,9 @@ A lightweight, non-intrusive Windows desktop overlay designed for multi-tasking 
 
 ## Demo Video
 
-![Dot Notifier mock demo showing ambient dots, grouped agent updates, expanded tasks, chat, and a system alert](assets/demo/dot-notifier-demo.gif)
+![Dot Notifier mock demo showing grouped updates, agent activity, music, timer, and reminder pill views](assets/demo/dot-notifier-demo.gif)
+
+[Watch the full demo (MP4)](assets/demo/dot-notifier-demo.mp4). This recording uses the local mock UI; native Windows integrations require a separate manual check.
 
 ---
 
@@ -161,8 +163,8 @@ Run the frontend in your browser with realistic mock events without compiling Ru
 pnpm dev:mock
 ```
 
-- Navigate to `http://localhost:5173/` for the interactive HUD and synthetic event controls.
-- Navigate to `http://localhost:5173/#lab` to open the **Motion Lab** for testing spring curves, refresh rates, and contrast over synthetic wallpapers.
+- Navigate to `http://localhost:1420/` for the interactive HUD and synthetic event controls.
+- Navigate to `http://localhost:1420/#lab` to open the **Motion Lab** for testing spring curves, refresh rates, and contrast over synthetic wallpapers.
 
 ### 2. Run the Full Native Desktop App
 
