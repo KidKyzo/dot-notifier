@@ -101,9 +101,10 @@ The app starts directly in the system tray. It never shows a main window or a ta
 - F40. Optional fourth dot for tokens and quota.
 - F41. LibreHardwareMonitor or HWiNFO for CPU temperature, fans, power (admin rights).
 
-**Extended Phase (to be decided, after Phase F)**
+**Extended Phase (F44 assigned by the pill-view update)**
 
-- F44. Now Playing module: read title, artist, cover, and play state from Windows System Media Transport Controls, with play, pause, next. Optional, off by default. Recognized music app IDs are accepted; browser sessions require a separate opt-in because Windows does not identify the site. No Spotify or YouTube API, no outbound.
+- F44. Now Playing reads title, artist, playback position, cover, and play state from Windows System Media Transport Controls. Music controls provide previous, play/pause, and next. A dynamic equalizer mark indicates active playback. Selecting Music in Settings enables the existing opt-in media feature. Recognized music app IDs are accepted; browser sessions require a separate opt-in because Windows does not identify the site. No Spotify or YouTube API, no outbound.
+- Pill views are user-selectable in Settings: All (default, preserves the combined view), Music, Agents (running tasks only), and Timer/reminders (local time plus the next active item). Selecting Music or Timer/reminders enables the corresponding optional feature. Text in the pill is larger for readability. Notifications remain part of All and the expanded panel.
 - F46. WhatsApp-style message card and incoming-call peek: sender initials as avatar, one line of text; call peek with an "Open WhatsApp" button.
 
 ## 7. Event Schema v2
@@ -233,13 +234,13 @@ Symptoms seen in v0.1.0: WhatsApp notifications sometimes arrive late, some mess
 
 - Antigravity IDE extension behind a clearly labeled experimental setting.
 
-**Extended Phase (to be decided, not scheduled)**
+**Extended Phase (F44 assigned; other modules remain undecided)**
 
 Modules to think about after the core is stable. Each one is optional, off by default, and behind a setting.
 
-- **Now Playing (F44):** Windows System Media Transport Controls gives title, artist, cover, and state, and accepts play, pause, next, for apps that integrate it. Only sessions with source app IDs identifying Spotify, Apple Music, or YouTube Music are included by default. An explicit setting can include Chrome/Edge sessions, but Windows does not expose the website, so any media played by that browser may appear. It is local, with no login and no outbound request. Shown as a section in the panel; a peek on track change is optional and off by default.
+- **Now Playing and pill views (F44):** Windows System Media Transport Controls provides title, artist, cover, playback position, and state, with previous, play/pause, and next controls. Only sessions with source app IDs identifying Spotify, Apple Music, or YouTube Music are included by default. An explicit setting can include Chrome/Edge sessions, but Windows does not expose the website, so any media played by that browser may appear. It is local, with no login and no outbound request. The user can choose All (the default combined pill), Music, Agents (running tasks only), or Timer/reminders (local time and the next active item) in Settings. Selecting Music enables the existing opt-in media feature and selecting Timer/reminders enables the existing timer feature. Pill text is larger for readability. In All or Timer/reminders view, a liquid-like blue fill grows from right to left for an active timer or scheduled reminder; pausing a timer freezes its fill. On timer completion, the pill fills fully and briefly displays “Time’s up”. A reminder fills fully when due and displays its title.
 - **WhatsApp-style card and call peek (F46):** the Windows listener probably does not provide a profile photo, so use colored initials. Answering or declining a call from the overlay is not promised; "Open WhatsApp" is.
-- **Not adopted from Quick Pill:** tasks, timer, clipboard manager, calendar, weather, quick apps. Out of scope unless decided later.
+- **Not adopted from Quick Pill:** clipboard manager, calendar, weather, and quick apps. Out of scope unless decided later.
 - **Decision criteria:** the core phases are stable, idle CPU and RAM budgets still hold with the module enabled, and the module can be removed without touching core code.
 
 **Definition of Done for every phase:** `pnpm check` passes; tested manually on Windows 10 and 11; no click-through regression; idle CPU and RAM stay within budget.

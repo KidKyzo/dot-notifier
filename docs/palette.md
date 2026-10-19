@@ -16,6 +16,7 @@ without relying on color alone.
 | `surface-raised` | `#222833` | Raised cards and controls |
 | `text-primary` | `#F4F6F8` | Primary text on dark surfaces |
 | `text-muted` | `#A5AFBD` | Secondary text on dark surfaces |
+| `music-accent` | `#F236B5` | Equalizer bars and unread count accent sampled from the user-provided pill reference |
 
 Idle dots use reduced opacity; active status colors use full opacity. Do not use
 these values to infer alert priority: queue priority is defined in the event
