@@ -8,8 +8,10 @@ import {
   loadReminderTimer,
   nextReminderDelayMs,
   nextDueActivity,
+  reminderProgress,
   saveReminderTimer,
   timerRemainingMs,
+  timerProgress,
   type ReminderTimerState,
 } from "./reminder-timer";
 
@@ -17,10 +19,10 @@ describe("reminder and timer state", () => {
   it("restores valid reminders and a running timer while discarding malformed entries", () => {
     const state: ReminderTimerState = {
       reminders: [
-        { id: "later", title: "Submit report", dueAt: 20_000, notified: false, relative: false, repeatMs: null },
+        { id: "later", title: "Submit report", startsAt: 15_000, dueAt: 20_000, notified: false, relative: false, repeatMs: null },
         { id: "first", title: "Call home", dueAt: 10_000, notified: true, relative: false, repeatMs: null },
       ],
-      timer: { id: "timer", endsAt: 70_000, remainingMs: null, notified: false },
+      timer: { id: "timer", endsAt: 70_000, durationMs: 70_000, remainingMs: null, notified: false },
     };
     let stored = "";
     saveReminderTimer({ setItem: (_key, value) => { stored = value; } }, state);
@@ -43,7 +45,7 @@ describe("reminder and timer state", () => {
   });
 
   it("keeps countdown time after restart and pauses without losing the remaining duration", () => {
-    const timer = { id: "timer", endsAt: 65_000, remainingMs: null, notified: false };
+    const timer = { id: "timer", endsAt: 65_000, durationMs: 60_000, remainingMs: null, notified: false };
     expect(timerRemainingMs(timer, 5_000)).toBe(60_000);
     expect(timerRemainingMs(timer, 35_000)).toBe(30_000);
     expect(timerRemainingMs({ ...timer, remainingMs: 30_000 }, 90_000)).toBe(30_000);
@@ -53,6 +55,42 @@ describe("reminder and timer state", () => {
     expect(formatDuration(30_000)).toBe("30s");
     expect(formatDuration(300_000)).toBe("5m");
     expect(formatDuration(7_200_000)).toBe("2h");
+  });
+
+  it("restores legacy timers without a saved total duration", () => {
+    const restored = loadReminderTimer({ getItem: () => JSON.stringify({
+      reminders: [],
+      timer: { id: "legacy", endsAt: 15_000, remainingMs: null },
+    }) }, 5_000);
+    expect(restored.timer).toEqual({
+      id: "legacy",
+      endsAt: 15_000,
+      durationMs: 10_000,
+      remainingMs: null,
+      notified: false,
+    });
+  });
+
+  it("tracks elapsed timer progress, including paused and completed timers", () => {
+    const timer = { id: "timer", endsAt: 100_000, durationMs: 100_000, remainingMs: null, notified: false };
+    expect(timerProgress(timer, 0)).toBe(0);
+    expect(timerProgress(timer, 25_000)).toBe(0.25);
+    expect(timerProgress({ ...timer, remainingMs: 75_000 }, 80_000)).toBe(0.25);
+    expect(timerProgress(timer, 120_000)).toBe(1);
+  });
+
+  it("tracks active reminder progress from its start time until due", () => {
+    const reminder = {
+      id: "reminder",
+      title: "Take a break",
+      startsAt: 10_000,
+      dueAt: 60_000,
+      notified: false,
+    };
+    expect(reminderProgress(reminder, 10_000)).toBe(0);
+    expect(reminderProgress(reminder, 35_000)).toBe(0.5);
+    expect(reminderProgress(reminder, 60_000)).toBe(1);
+    expect(reminderProgress({ ...reminder, startsAt: undefined }, 35_000)).toBe(0);
   });
 
   it("converts seconds, minutes and hours into bounded durations", () => {
@@ -85,11 +123,11 @@ describe("reminder and timer state", () => {
       timer: null,
     };
     expect(acknowledgeDueReminder(repeated, "water", 200_000).reminders[0])
-      .toEqual({ id: "water", title: "Drink water", dueAt: 250_000, notified: false, relative: true, repeatMs: 60_000 });
+      .toEqual({ id: "water", title: "Drink water", startsAt: 190_000, dueAt: 250_000, notified: false, relative: true, repeatMs: 60_000 });
   });
 
   it("alerts the earliest due item and ignores acknowledged or paused items", () => {
-    const timer = { id: "timer", endsAt: 8_000, remainingMs: null, notified: false };
+    const timer = { id: "timer", endsAt: 8_000, durationMs: 8_000, remainingMs: null, notified: false };
     const state: ReminderTimerState = {
       reminders: [
         { id: "first", title: "First", dueAt: 10_000, notified: false },
@@ -104,7 +142,7 @@ describe("reminder and timer state", () => {
   });
 
   it("removes a finished timer without opening a timer alert", () => {
-    const timer = { id: "timer", endsAt: 8_000, remainingMs: null, notified: false };
+    const timer = { id: "timer", endsAt: 8_000, durationMs: 8_000, remainingMs: null, notified: false };
     const state: ReminderTimerState = { reminders: [], timer };
     expect(clearFinishedTimer(state, 7_999)).toBe(state);
     expect(clearFinishedTimer(state, 8_000)).toEqual({ reminders: [], timer: null });

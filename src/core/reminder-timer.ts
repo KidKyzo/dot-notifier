@@ -3,6 +3,7 @@ export type Reminder = {
   title: string;
   dueAt: number;
   notified: boolean;
+  startsAt?: number;
   relative?: boolean;
   repeatMs?: number | null;
 };
@@ -10,6 +11,7 @@ export type Reminder = {
 export type CountdownTimer = {
   id: string;
   endsAt: number;
+  durationMs: number;
   remainingMs: number | null;
   notified: boolean;
 };
@@ -38,7 +40,7 @@ export const durationToMs = (value: number, unit: DurationUnit): number | null =
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-export const loadReminderTimer = (storage: Pick<Storage, "getItem">): ReminderTimerState => {
+export const loadReminderTimer = (storage: Pick<Storage, "getItem">, now = Date.now()): ReminderTimerState => {
   try {
     const raw = storage.getItem(storageKey);
     if (!raw) return emptyReminderTimer;
@@ -55,6 +57,10 @@ export const loadReminderTimer = (storage: Pick<Storage, "getItem">): ReminderTi
         title: (item.title as string).trim().slice(0, 80),
         dueAt: item.dueAt as number,
         notified: item.notified === true,
+        ...(typeof item.startsAt === "number" && Number.isFinite(item.startsAt)
+          && item.startsAt >= 0 && item.startsAt < (item.dueAt as number)
+          ? { startsAt: item.startsAt }
+          : {}),
         relative: item.relative === true,
         repeatMs: typeof item.repeatMs === "number" && Number.isSafeInteger(item.repeatMs)
           && item.repeatMs > 0 && item.repeatMs <= maxDurationMs ? item.repeatMs : null,
@@ -73,6 +79,10 @@ export const loadReminderTimer = (storage: Pick<Storage, "getItem">): ReminderTi
       ? {
         id: storedTimer.id,
         endsAt: storedTimer.endsAt,
+        durationMs: typeof storedTimer.durationMs === "number" && Number.isSafeInteger(storedTimer.durationMs)
+          && storedTimer.durationMs > 0 && storedTimer.durationMs <= maxDurationMs
+          ? storedTimer.durationMs
+          : Math.min(maxDurationMs, Math.max(1, (storedTimer.remainingMs as number | null) ?? storedTimer.endsAt - now)),
         remainingMs: storedTimer.remainingMs as number | null,
         notified: storedTimer.notified === true,
       }
@@ -91,6 +101,19 @@ export const saveReminderTimer = (storage: Pick<Storage, "setItem">, value: Remi
 export const timerRemainingMs = (timer: CountdownTimer, now: number): number =>
   Math.max(0, timer.remainingMs ?? timer.endsAt - now);
 
+export const timerProgress = (timer: CountdownTimer, now: number): number => {
+  if (timer.durationMs <= 0) return 0;
+  return Math.min(1, Math.max(0, 1 - timerRemainingMs(timer, now) / timer.durationMs));
+};
+
+export const reminderProgress = (reminder: Reminder, now: number): number => {
+  const startsAt = reminder.startsAt;
+  if (startsAt === undefined) return 0;
+  const durationMs = reminder.dueAt - startsAt;
+  if (durationMs <= 0) return 0;
+  return Math.min(1, Math.max(0, (now - startsAt) / durationMs));
+};
+
 export const clearFinishedTimer = (state: ReminderTimerState, now: number): ReminderTimerState =>
   state.timer?.remainingMs === null && state.timer.endsAt <= now
     ? { ...state, timer: null }
@@ -103,7 +126,8 @@ export const acknowledgeDueReminder = (state: ReminderTimerState, id: string, no
     const repeatMs = reminder.repeatMs;
     if (!repeatMs) return { ...reminder, notified: true };
     const elapsedIntervals = Math.floor(Math.max(0, now - reminder.dueAt) / repeatMs) + 1;
-    return { ...reminder, dueAt: reminder.dueAt + elapsedIntervals * repeatMs, notified: false };
+    const dueAt = reminder.dueAt + elapsedIntervals * repeatMs;
+    return { ...reminder, startsAt: dueAt - repeatMs, dueAt, notified: false };
   }),
 });
 
