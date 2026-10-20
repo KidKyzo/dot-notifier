@@ -10,9 +10,9 @@ A lightweight, non-intrusive Windows desktop overlay designed for multi-tasking 
 
 ## Demo Video
 
-![Dot Notifier mock demo showing grouped updates, agent activity, music, timer, and reminder pill views](assets/demo/dot-notifier-demo.gif)
+![Animated Dot Notifier demo showing agent tasks, permission requests, grouped notifications, system metrics, music, timers, reminders, and clipboard mode](assets/demo/dot-notifier-demo.gif)
 
-[Watch the full demo (MP4)](assets/demo/dot-notifier-demo.mp4). This recording uses the local mock UI; native Windows integrations require a separate manual check.
+[Watch the 36-second demo with an original electronic soundtrack (MP4)](assets/demo/dot-notifier-demo.mp4). The animated preview is silent. All scenes are recorded from the local mock UI; native Windows integrations require a separate manual check.
 
 ---
 

@@ -14,6 +14,20 @@ describe("pill view geometry", () => {
   it("keeps the Agents pill the same size as Music", () => {
     expect(modePillSize("agents")).toEqual(modePillSize("music"));
   });
+
+  it("keeps the Clipboard pill the same size as Music", () => {
+    expect(modePillSize("clipboard")).toEqual(modePillSize("music"));
+  });
+
+  it("gives the Timer pill enough height for its dial and two-line status", () => {
+    expect(modePillSize("timer").height).toBe(40);
+  });
+});
+
+describe("task completion motion", () => {
+  it("keeps the AI dot green for five seconds after completion", () => {
+    expect(motionTokens.timing.taskDoneMs).toBe(5_000);
+  });
 });
 
 describe("pill fill motion", () => {
@@ -67,5 +81,27 @@ describe("retargetable morph spring", () => {
     expect(isSpringAxisSettled(at144Hz)).toBe(true);
     expect(at60Hz.position).toBe(300);
     expect(at144Hz.position).toBe(300);
+  });
+
+  it("returns to a compact target without overshooting", () => {
+    let axis = retargetSpringAxis(createSpringAxis(475), 44);
+    for (let frame = 0; frame < 180 && !isSpringAxisSettled(axis); frame += 1) {
+      const previousPosition = axis.position;
+      axis = advanceSpringAxis(axis, 1 / 60, motionTokens.spring.morph);
+      expect(axis.position).toBeLessThanOrEqual(previousPosition);
+      expect(axis.position).toBeGreaterThanOrEqual(axis.target);
+    }
+    expect(isSpringAxisSettled(axis)).toBe(true);
+  });
+
+  it("compacts a due notice without crossing the pill height", () => {
+    let axis = retargetSpringAxis(createSpringAxis(475), 44);
+    for (let frame = 0; frame < 180 && !isSpringAxisSettled(axis); frame += 1) {
+      const previousPosition = axis.position;
+      axis = advanceSpringAxis(axis, 1 / 60, motionTokens.spring.noticeTakeover);
+      expect(axis.position).toBeLessThanOrEqual(previousPosition);
+      expect(axis.position).toBeGreaterThanOrEqual(axis.target);
+    }
+    expect(isSpringAxisSettled(axis)).toBe(true);
   });
 });

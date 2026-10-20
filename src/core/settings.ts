@@ -15,10 +15,15 @@ export type UserSettings = {
   allowDuringFullscreen: boolean;
 };
 
-export type PillMode = "all" | "music" | "agents" | "timer";
-export const pillPresentation = (mode: PillMode, noticeActive: boolean): { mode: PillMode; showNotice: boolean } => ({
+export type PillMode = "all" | "music" | "agents" | "timer" | "clipboard";
+export const pillPresentation = (mode: PillMode, noticeActive: boolean): {
+  mode: PillMode;
+  showNotice: boolean;
+  showAmbientActivity: boolean;
+} => ({
   mode,
   showNotice: noticeActive && (mode === "music" || mode === "agents"),
+  showAmbientActivity: mode === "timer",
 });
 export type AgentIntegration = "codex" | "claude" | "antigravity";
 
@@ -39,7 +44,11 @@ export const isAgentIntegrationEnabled = (
 };
 
 export const shouldExpandPillOnHover = (mode: PillMode): boolean =>
-  mode === "all" || mode === "music" || mode === "agents" || mode === "timer";
+  mode === "all" || mode === "music" || mode === "agents" || mode === "timer"
+  || mode === "clipboard";
+
+export const isUtilityModeOpen = (mode: PillMode, expanded: boolean, settingsOpen: boolean): boolean =>
+  mode === "clipboard" && expanded && !settingsOpen;
 
 export const defaultSettings: UserSettings = {
   peekDurationSeconds: 4,
@@ -86,7 +95,7 @@ export const loadSettings = (storage: Pick<Storage, "getItem">): UserSettings =>
         : defaultSettings.corner,
       monitorKey: typeof record.monitorKey === "string" ? record.monitorKey : defaultSettings.monitorKey,
       pillMode: record.pillMode === "music" || record.pillMode === "agents"
-        || record.pillMode === "timer"
+        || record.pillMode === "timer" || record.pillMode === "clipboard"
         ? record.pillMode
         : defaultSettings.pillMode,
       nowPlayingEnabled: typeof record.nowPlayingEnabled === "boolean" ? record.nowPlayingEnabled : false,

@@ -17,9 +17,11 @@ mod antigravity_logs;
 mod approvals;
 mod bus;
 mod claude_hooks;
+mod clipboard;
 mod codex_logs;
 mod focus;
 mod media_controls;
+mod media_volume;
 mod notification_filter;
 mod system_monitor;
 mod win_notifications;
@@ -136,6 +138,39 @@ async fn control_now_playing(action: String, allow_browser_media: bool) -> Resul
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn music_session_volume(allow_browser_media: bool) -> Result<Option<u8>, String> {
+    tauri::async_runtime::spawn_blocking(move || media_volume::current(allow_browser_media))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn set_music_session_volume(
+    level: u8,
+    allow_browser_media: bool,
+) -> Result<Option<u8>, String> {
+    tauri::async_runtime::spawn_blocking(move || media_volume::set(level, allow_browser_media))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn read_current_clipboard() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(clipboard::read_current_text)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn read_clipboard_snapshot(
+    last_sequence: Option<u32>,
+) -> Result<Option<clipboard::ClipboardSnapshot>, String> {
+    tauri::async_runtime::spawn_blocking(move || clipboard::read_snapshot(last_sequence))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -851,6 +886,10 @@ pub fn run() {
             focus_process,
             get_now_playing,
             control_now_playing,
+            music_session_volume,
+            set_music_session_volume,
+            read_current_clipboard,
+            read_clipboard_snapshot,
             open_whatsapp,
             respond_permission,
             dismiss_permission,

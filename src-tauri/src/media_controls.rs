@@ -52,7 +52,14 @@ pub struct NowPlaying {
     pub artist: String,
     pub playing: bool,
     pub position_seconds: u64,
+    pub position_updated_at_ms: Option<i64>,
     pub cover_data_url: Option<String>,
+}
+
+fn windows_time_to_unix_ms(windows_ticks: i64) -> Option<i64> {
+    windows_ticks
+        .checked_sub(116_444_736_000_000_000)
+        .map(|unix_ticks| unix_ticks / 10_000)
 }
 
 #[cfg(windows)]
@@ -75,11 +82,21 @@ pub fn current(allow_browser_media: bool) -> Option<NowPlaying> {
         .ok()
         .and_then(|info| info.PlaybackStatus().ok())
         .is_some_and(|status| status == PlaybackStatus::Playing);
-    let position_seconds = session
+    let (position_seconds, position_updated_at_ms) = session
         .GetTimelineProperties()
         .ok()
-        .and_then(|timeline| timeline.Position().ok())
-        .map(|position| (position.Duration / 10_000_000).max(0) as u64)
+        .map(|timeline| {
+            let position_seconds = timeline
+                .Position()
+                .ok()
+                .map(|position| (position.Duration / 10_000_000).max(0) as u64)
+                .unwrap_or_default();
+            let position_updated_at_ms = timeline
+                .LastUpdatedTime()
+                .ok()
+                .and_then(|updated_at| windows_time_to_unix_ms(updated_at.UniversalTime));
+            (position_seconds, position_updated_at_ms)
+        })
         .unwrap_or_default();
     static LAST_TRACK: OnceLock<Mutex<Option<NowPlaying>>> = OnceLock::new();
     let cache = LAST_TRACK.get_or_init(|| Mutex::new(None));
@@ -91,6 +108,7 @@ pub fn current(allow_browser_media: bool) -> Option<NowPlaying> {
             return Some(NowPlaying {
                 playing,
                 position_seconds,
+                position_updated_at_ms,
                 ..previous.clone()
             });
         }
@@ -120,6 +138,7 @@ pub fn current(allow_browser_media: bool) -> Option<NowPlaying> {
         artist,
         playing,
         position_seconds,
+        position_updated_at_ms,
         cover_data_url,
     };
     if let Ok(mut last_track) = cache.lock() {
@@ -160,7 +179,7 @@ pub fn control(action: &str, allow_browser_media: bool) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn supported_music_session(
+pub(crate) fn supported_music_session(
     manager: &windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager,
     allow_browser_media: bool,
 ) -> Option<windows::Media::Control::GlobalSystemMediaTransportControlsSession> {
@@ -234,7 +253,7 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64, MediaAction};
+    use super::{base64, windows_time_to_unix_ms, MediaAction};
 
     #[test]
     fn parses_supported_playback_actions() {
@@ -251,5 +270,15 @@ mod tests {
         assert_eq!(base64(b"f"), "Zg==");
         assert_eq!(base64(b"fo"), "Zm8=");
         assert_eq!(base64(b"foo"), "Zm9v");
+    }
+
+    #[test]
+    fn converts_windows_timeline_update_time_to_unix_milliseconds() {
+        const WINDOWS_UNIX_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
+        assert_eq!(windows_time_to_unix_ms(WINDOWS_UNIX_EPOCH_TICKS), Some(0));
+        assert_eq!(
+            windows_time_to_unix_ms(WINDOWS_UNIX_EPOCH_TICKS + 25_000_000),
+            Some(2_500)
+        );
     }
 }

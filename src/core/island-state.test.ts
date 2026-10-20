@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { islandReducer } from "./island-state";
+import { islandReducer, shouldScheduleHoverCollapse } from "./island-state";
 
 describe("island state transitions", () => {
   it("moves through idle, alert, peek, expanded, and back to idle", () => {
@@ -19,5 +19,12 @@ describe("island state transitions", () => {
   it("dismisses a peek after its timer without changing other states", () => {
     expect(islandReducer("peek", { type: "dismiss" })).toBe("idle");
     expect(islandReducer("alert", { type: "dismiss" })).toBe("alert");
+  });
+
+  it("collapses an unpinned expanded panel even if hover tracking desynchronizes during a chat burst", () => {
+    expect(shouldScheduleHoverCollapse("expanded", false, false, false)).toBe(true);
+    expect(shouldScheduleHoverCollapse("expanded", true, true, false)).toBe(false);
+    expect(shouldScheduleHoverCollapse("expanded", false, false, true)).toBe(false);
+    expect(shouldScheduleHoverCollapse("idle", false, false, false)).toBe(false);
   });
 });

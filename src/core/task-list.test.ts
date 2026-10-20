@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
-import type { DemoTask } from "./mock";
+import type { DemoStatus, DemoTask } from "./mock";
 import {
+  aggregateTaskDotStatus,
   aggregateTaskProgress,
   aggregateTaskStatus,
+  codexTaskRowsForPanel,
+  hasNewlyCompletedTask,
+  groupTasksByAgent,
   primaryCodexTask,
   primaryCodexTaskRows,
+  taskElapsedLabel,
+  taskCompletionPreview,
   upsertTask,
   validTaskUsage,
 } from "./task-list";
@@ -62,6 +68,71 @@ describe("Codex task list", () => {
 
     expect(updated.pid).toBe(4321);
     expect(updated.usage).toEqual({ tokens: 18200, quotaLeft: 0.63 });
+  });
+
+  it("does not present a transient activity as the completed task", () => {
+    const running = { ...task("thread", "running", 100), title: "Editing code" };
+    const completed = upsertTask([running], {
+      ...task("thread", "done"),
+      title: "Codex task completed",
+    }, 200)[0];
+
+    expect(completed.title).toBe("Codex task completed");
+    expect(completed.status).toBe("done");
+  });
+
+  it("keeps a descriptive task name when a generic completion arrives", () => {
+    const running = { ...task("thread", "running", 100), title: "Migrate customer database" };
+    const completed = upsertTask([running], {
+      ...task("thread", "done"),
+      title: "Codex task completed",
+    }, 200)[0];
+
+    expect(completed.title).toBe("Migrate customer database");
+  });
+
+  it("shows a bounded final-answer preview without line breaks", () => {
+    expect(taskCompletionPreview("  Fixed volume\n and reminder  ")).toBe("Fixed volume and reminder");
+    expect(taskCompletionPreview(" ")).toBeUndefined();
+    expect(taskCompletionPreview("x".repeat(300))).toHaveLength(280);
+  });
+
+  it("does not invent a running Codex task when the integration has no session", () => {
+    expect(codexTaskRowsForPanel([], true, "No active task")).toEqual([{
+      id: "codex-idle",
+      source: "codex",
+      name: "Codex",
+      status: "idle",
+      title: "No active task",
+      progress: 0,
+    }]);
+    expect(codexTaskRowsForPanel([], false, "No active task")).toEqual([]);
+  });
+
+  it("keeps Antigravity app, CLI, and IDE sessions under distinct headings", () => {
+    const tasks: DemoTask[] = [
+      { ...task("app", "running"), source: "antigravity-app" },
+      { ...task("cli", "running"), source: "antigravity-cli" },
+      { ...task("ide", "running"), source: "antigravity-ide" },
+    ];
+
+    expect(groupTasksByAgent(tasks, "Other agents").map(({ name }) => name)).toEqual([
+      "Antigravity App",
+      "Antigravity CLI",
+      "Antigravity IDE",
+    ]);
+  });
+
+  it("keeps concurrent sessions visible together under one agent heading", () => {
+    const tasks = [task("session-one", "running"), task("session-two", "running")];
+
+    expect(groupTasksByAgent(tasks, "Other agents")).toEqual([
+      { name: "Codex", rows: tasks },
+    ]);
+  });
+
+  it("formats running time as hours, minutes, and seconds after an hour", () => {
+    expect(taskElapsedLabel(0, 3_723_000)).toBe("1:02:03");
   });
 });
 
@@ -129,6 +200,31 @@ describe("aggregate dot color / status (F30)", () => {
       agentTask("2", "antigravity-ide", "done", 1),
     ];
     expect(aggregateTaskStatus(tasks)).toBe("done");
+  });
+
+  it("shows done only during the completion grace period, then returns to idle", () => {
+    const tasks = [agentTask("1", "codex", "done", 1)];
+
+    expect(aggregateTaskDotStatus(tasks, 5_000, 4_999)).toBe("done");
+    expect(aggregateTaskDotStatus(tasks, 5_000, 5_000)).toBe("idle");
+  });
+
+  it("keeps higher priority task states above a recent completion", () => {
+    const tasks = [
+      agentTask("1", "codex", "done", 1),
+      agentTask("2", "claude", "running", 0.5),
+    ];
+
+    expect(aggregateTaskDotStatus(tasks, 5_000, 1_000)).toBe("running");
+  });
+
+  it("starts a completion notice only on a transition into done", () => {
+    const previous = new Map<string, DemoStatus>([["1", "running"]]);
+    const completed = [agentTask("1", "codex", "done", 1)];
+    const alreadyCompleted = new Map<string, DemoStatus>([["1", "done"]]);
+
+    expect(hasNewlyCompletedTask(previous, completed)).toBe(true);
+    expect(hasNewlyCompletedTask(alreadyCompleted, completed)).toBe(false);
   });
 
   it("calculates average progress of running tasks and 0 when none running", () => {

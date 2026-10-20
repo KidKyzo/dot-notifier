@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { settingsCopy } from "./settings-copy";
 import {
   defaultSettings,
   pillPresentation,
   getAgentIntegration,
+  isUtilityModeOpen,
   isAgentIntegrationEnabled,
   loadSettings,
   parseMonitoredApps,
@@ -10,6 +12,12 @@ import {
 } from "./settings";
 
 describe("user settings", () => {
+  it("shows the saved Clipboard entry count in singular and plural forms", () => {
+    expect(settingsCopy.clipboardCount(0)).toBe("0 saved items");
+    expect(settingsCopy.clipboardCount(1)).toBe("1 saved item");
+    expect(settingsCopy.clipboardCount(3)).toBe("3 saved items");
+  });
+
   it("normalizes monitored apps and removes duplicates", () => {
     expect(parseMonitoredApps(" WhatsApp, Telegram, WhatsApp ,, ")).toEqual(["WhatsApp", "Telegram"]);
   });
@@ -38,13 +46,13 @@ describe("user settings", () => {
   });
 
   it("persists supported pill views and falls back to All for unknown values", () => {
-    const modes = ["all", "music", "agents", "timer"] as const;
+    const modes = ["all", "music", "agents", "timer", "clipboard"] as const;
     for (const pillMode of modes) {
       expect(loadSettings({
         getItem: () => JSON.stringify({ pillMode }),
       }).pillMode).toBe(pillMode);
     }
-    for (const pillMode of ["unsupported", "notifications"]) {
+    for (const pillMode of ["unsupported", "notifications", "volume"]) {
       expect(loadSettings({
         getItem: () => JSON.stringify({ pillMode }),
       }).pillMode).toBe("all");
@@ -53,16 +61,26 @@ describe("user settings", () => {
 
   it("keeps Music and Agents visible while due activity is shown", () => {
     for (const mode of ["music", "agents"] as const) {
-      expect(pillPresentation(mode, true)).toEqual({ mode, showNotice: true });
-      expect(pillPresentation(mode, false)).toEqual({ mode, showNotice: false });
+      expect(pillPresentation(mode, true)).toEqual({ mode, showNotice: true, showAmbientActivity: false });
+      expect(pillPresentation(mode, false)).toEqual({ mode, showNotice: false, showAmbientActivity: false });
     }
-    expect(pillPresentation("all", true)).toEqual({ mode: "all", showNotice: false });
-    expect(pillPresentation("timer", true)).toEqual({ mode: "timer", showNotice: false });
+    expect(pillPresentation("all", true)).toEqual({ mode: "all", showNotice: false, showAmbientActivity: false });
+    expect(pillPresentation("all", false)).toEqual({ mode: "all", showNotice: false, showAmbientActivity: false });
+    expect(pillPresentation("timer", true)).toEqual({ mode: "timer", showNotice: false, showAmbientActivity: true });
+    expect(pillPresentation("timer", false)).toEqual({ mode: "timer", showNotice: false, showAmbientActivity: true });
+    expect(pillPresentation("clipboard", true)).toEqual({ mode: "clipboard", showNotice: false, showAmbientActivity: false });
   });
 
   it("lets every pill view expand on hover", () => {
-    const modes = ["all", "music", "agents", "timer"] as const;
+    const modes = ["all", "music", "agents", "timer", "clipboard"] as const;
     for (const mode of modes) expect(shouldExpandPillOnHover(mode)).toBe(true);
+  });
+
+  it("opens clipboard access only while its panel is expanded", () => {
+    expect(isUtilityModeOpen("clipboard", false, false)).toBe(false);
+    expect(isUtilityModeOpen("clipboard", true, true)).toBe(false);
+    expect(isUtilityModeOpen("clipboard", true, false)).toBe(true);
+    expect(isUtilityModeOpen("all", true, false)).toBe(false);
   });
 
   it("stops tracking disabled agent integrations while preserving the others", () => {

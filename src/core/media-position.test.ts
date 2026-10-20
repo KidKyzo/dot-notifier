@@ -18,6 +18,16 @@ describe("live media position", () => {
     expect(mediaPositionSeconds(repeated, 5_500)).toBe(40);
   });
 
+  it("accounts for the age of the Windows timeline position", () => {
+    const snapshot = syncMediaPosition(null, {
+      ...track,
+      positionSeconds: 100,
+      positionUpdatedAtMs: 1_000,
+    }, 5_500);
+
+    expect(mediaPositionSeconds(snapshot, 5_500)).toBe(104);
+  });
+
   it("uses a new track or a backward seek immediately", () => {
     const first = syncMediaPosition(null, track, 1_000);
     const seek = syncMediaPosition(first, { ...track, positionSeconds: 12 }, 6_000);

@@ -1,6 +1,7 @@
 export const motionTokens = {
   spring: {
-    morph: { stiffness: 340, damping: 28, mass: 1 },
+    morph: { stiffness: 460, damping: 44, mass: 1 },
+    noticeTakeover: { stiffness: 700, damping: 54, mass: 1 },
     timerCollapse: { stiffness: 460, damping: 25, mass: 0.82 },
     dot: { stiffness: 500, damping: 30, mass: 1 },
   },
@@ -15,7 +16,7 @@ export const motionTokens = {
       withNowPlaying: 205,
       withNowPlayingAndTimer: 300,
     },
-    modePill: { musicWidth: 340, musicHeight: 40, timerWidth: 300, timerHeight: 36 },
+    modePill: { musicWidth: 340, musicHeight: 40, timerWidth: 300, timerHeight: 40 },
     tallPeek: { multiMessageBase: 56, rowHeight: 32, approval: 72, chat: 76, call: 92 },
   },
   timing: {
@@ -31,10 +32,11 @@ export const motionTokens = {
     rowExitMs: 180,
     hoverLeaveDelayMs: 350,
     ringProgressMs: 800,
+    taskDoneMs: 5_000,
   },
 } as const;
 
-export function modePillSize(mode: "music" | "agents" | "timer"): { width: number; height: number } {
+export function modePillSize(mode: "music" | "agents" | "timer" | "clipboard"): { width: number; height: number } {
   const geometry = motionTokens.geometry.modePill;
   return mode === "timer"
     ? { width: geometry.timerWidth, height: geometry.timerHeight }

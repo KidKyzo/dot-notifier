@@ -2,21 +2,33 @@ import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState }
 import type { CSSProperties, KeyboardEvent, MouseEvent } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { islandReducer } from "./core/island-state";
+import { islandReducer, shouldScheduleHoverCollapse } from "./core/island-state";
 import { isHudToggleShortcut } from "./core/hud-keyboard";
 import { CHAT_RETENTION_MS, EventStore, eventCreatedAtMs, type AppEvent } from "./core/event-store";
 import { isWhatsAppApp, pruneExpiredMessages, removeWhatsAppMessages, upsertChatMessage } from "./core/chat-retention";
 import {
-  aggregateTaskStatus,
-  primaryCodexTaskRows,
+  aiStatusPriority,
+  aggregateTaskDotStatus,
+  codexTaskRowsForPanel,
+  groupTasksByAgent,
+  hasNewlyCompletedTask,
+  taskElapsedLabel,
+  taskCompletionPreview,
+  taskGroupName,
   upsertTask,
 } from "./core/task-list";
+import { clearTaskHistory, loadTaskHistory, saveTaskHistory, upsertTaskHistory, type TaskHistoryEntry } from "./core/task-history";
+import { addClipboardEntry, loadClipboardHistory, saveClipboardHistory, type ClipboardEntry } from "./core/clipboard-history";
+import { calendarDays, localDayKey } from "./core/calendar";
 import { initialSystemMetrics, mockSystemAlert, parseSystemMetrics } from "./core/system-metrics";
 import { systemCopy } from "./core/system-copy";
-import { agentActivityLabel, settingsCopy } from "./core/settings-copy";
+import { agentActivityLabel, isAgentActivityTitle, settingsCopy } from "./core/settings-copy";
 import { afterNoticeMessage, type PillNotice } from "./core/pill-notice";
 import { ActivityCountdown, ActivityDial } from "./ActivityVisuals";
+import { MusicVolumeControl } from "./MusicVolumeControl";
+import { ReminderDateField } from "./ReminderDateField";
 import { mediaPositionSeconds, syncMediaPosition, type LiveMediaPosition } from "./core/media-position";
+import { SONG_TITLE_GAP_PX, SONG_TITLE_REST_MS, songTitleMotion, type SongTitleMotion } from "./core/song-title-motion";
 import {
   defaultSettings,
   pillPresentation,
@@ -77,7 +89,7 @@ type DotStatus = DemoStatus | "warn" | "crit";
 type PeekInfo = { source: string; message: string; dotStatus: DotStatus; chatMessages: AppEvent[]; groupEvents?: AppEvent[]; groupEventIds?: string[]; overflowCount?: number; actionEvent?: AppEvent; chatSender?: string; chatApp?: string; incomingCall?: boolean };
 type MonitorOption = { key: string; label: string; width: number; height: number };
 type ReminderSchedule = "after" | "at";
-type NowPlayingSnapshot = { title: string; artist: string; playing: boolean; positionSeconds: number; coverDataUrl: string | null };
+type NowPlayingSnapshot = { title: string; artist: string; playing: boolean; positionSeconds: number; positionUpdatedAtMs?: number | null; coverDataUrl: string | null };
 type NowPlayingState = NowPlayingSnapshot & LiveMediaPosition;
 type HudShape = { width: SpringAxis; height: SpringAxis; radius: SpringAxis; frame: number | null; lastFrame: number | null };
 
@@ -104,6 +116,12 @@ const percent = (value: number | null) => value === null ? systemCopy.unavailabl
 const initials = (name: string) => name.trim().split(/\s+/).slice(0, 2).map((part) => Array.from(part)[0] ?? "").join("").toUpperCase() || "?";
 
 const avatarHue = (name: string) => Array.from(name).reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) % 360, 0);
+const formatTaskStartedAt = (timestamp: number) => new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+}).format(timestamp);
 const agentDisplayName = (agent?: AppEvent["agent"], meta?: AppEvent["meta"]): string => {
   if (agent === "external" && typeof meta?.product === "string") return meta.product;
   switch (agent) {
@@ -195,14 +213,6 @@ function SystemMetric({ label, value, samples }: {
   );
 }
 
-const durationLabel = (startedAt?: number) => {
-  if (startedAt === undefined) return "";
-  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-  const minutes = String(Math.floor(seconds / 60)).padStart(2, "0");
-  const remainder = String(seconds % 60).padStart(2, "0");
-  return `${minutes}:${remainder}`;
-};
-
 function Dot({
   status,
   progress = 0,
@@ -240,10 +250,410 @@ function MusicBars({ playing }: { playing: boolean }) {
   );
 }
 
+function ClipboardModeIcon() {
+  return (
+    <svg aria-hidden="true" className="utility-mode-icon" viewBox="0 0 20 20">
+      <path d="M7 4.5h-1.5A1.5 1.5 0 0 0 4 6v9.5A1.5 1.5 0 0 0 5.5 17h9a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H13" />
+      <rect height="3" rx="1" width="6" x="7" y="3" />
+      <path d="M7.5 9h5M7.5 12h5" />
+    </svg>
+  );
+}
+
+function PillModeShortcutIcon({ mode }: { mode: PillMode }) {
+  if (mode === "clipboard") return <ClipboardModeIcon />;
+
+  return (
+    <svg aria-hidden="true" className="pill-mode-icon" viewBox="0 0 20 20">
+      {mode === "all" ? (
+        <>
+          <rect height="5.5" rx="1" width="5.5" x="3" y="3" />
+          <rect height="5.5" rx="1" width="5.5" x="11.5" y="3" />
+          <rect height="5.5" rx="1" width="5.5" x="3" y="11.5" />
+          <rect height="5.5" rx="1" width="5.5" x="11.5" y="11.5" />
+        </>
+      ) : mode === "music" ? (
+        <>
+          <path d="M10 13V5l6-1.5V12" />
+          <ellipse cx="7.5" cy="14.5" rx="2.5" ry="1.7" />
+          <ellipse cx="13.5" cy="13.5" rx="2.5" ry="1.7" />
+        </>
+      ) : mode === "agents" ? (
+        <>
+          <circle cx="4.5" cy="5" r="1" />
+          <path d="M8 5h8M4.5 10a1 1 0 1 0 0 .01M8 10h8m-11.5 5h1m2.5 0h8" />
+        </>
+      ) : (
+        <>
+          <circle cx="10" cy="11" r="6.5" />
+          <path d="M10 7.5V11l2.5 1.5M8 2.5h4m-2 0v2" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+function TaskSummaryCopy({ signature, title, meta }: { signature: string; title: string; meta: string }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const previousSignature = useRef(signature);
+
+  useLayoutEffect(() => {
+    if (previousSignature.current === signature) return;
+    previousSignature.current = signature;
+    const node = ref.current;
+    if (!node || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const animation = node.animate(
+      [
+        { opacity: 0.7, translate: "0px 2px" },
+        { opacity: 1, translate: "0px 0px" },
+      ],
+      { duration: motionTokens.timing.contentInMs, easing: "cubic-bezier(0.16, 1, 0.3, 1)" },
+    );
+    return () => animation.cancel();
+  }, [signature]);
+
+  return (
+    <span className="task-summary-copy" ref={ref}>
+      <span className="task-summary-title">{title}</span>
+      {meta && <small className="task-summary-meta">{meta}</small>}
+    </span>
+  );
+}
+
+function ScrollingSongTitle({ title }: { title: string }) {
+  const viewportRef = useRef<HTMLElement>(null);
+  const titleRef = useRef<HTMLElement>(null);
+  const trackRef = useRef<HTMLElement>(null);
+  const [motion, setMotion] = useState<SongTitleMotion | null>(null);
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const text = titleRef.current;
+    if (!viewport || !text) return;
+    const measure = () => {
+      const next = songTitleMotion(viewport.clientWidth, text.scrollWidth);
+      setMotion((current) => current?.travelPx === next?.travelPx ? current : next);
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(viewport);
+    observer.observe(text);
+    measure();
+    return () => observer.disconnect();
+  }, [title]);
+
+  useLayoutEffect(() => {
+    const track = trackRef.current;
+    if (!track || !motion) return;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    let animation: Animation | null = null;
+    const updateAnimation = () => {
+      animation?.cancel();
+      if (reducedMotion.matches) return;
+      const duration = SONG_TITLE_REST_MS + motion.scrollDurationMs;
+      animation = track.animate([
+        { transform: "translateX(0)", offset: 0 },
+        { transform: "translateX(0)", offset: SONG_TITLE_REST_MS / duration },
+        { transform: `translateX(-${motion.travelPx}px)`, offset: 1 },
+      ], { duration, iterations: Infinity, easing: "linear" });
+    };
+    updateAnimation();
+    reducedMotion.addEventListener("change", updateAnimation);
+    return () => {
+      reducedMotion.removeEventListener("change", updateAnimation);
+      animation?.cancel();
+    };
+  }, [motion]);
+
+  return (
+    <b
+      className={`scrolling-song-title${motion ? " is-overflowing" : ""}`}
+      ref={viewportRef}
+      title={title}
+    >
+      <i className="scrolling-song-track" ref={trackRef} style={{ columnGap: SONG_TITLE_GAP_PX }}>
+        <em ref={titleRef}>{title}</em>
+        {motion && <em aria-hidden="true">{title}</em>}
+      </i>
+    </b>
+  );
+}
+
+function PillModeShortcuts({ mode, onSelect }: { mode: PillMode; onSelect: (mode: PillMode) => void }) {
+  const modes: { value: PillMode; label: string; title: string }[] = [
+    { value: "all", label: settingsCopy.pillModeAll, title: settingsCopy.pillModeAll },
+    { value: "music", label: settingsCopy.pillModeMusic, title: settingsCopy.pillModeMusic },
+    { value: "agents", label: settingsCopy.pillModeAgents, title: settingsCopy.pillModeAgents },
+    { value: "timer", label: settingsCopy.pillModeTimerShortcut, title: settingsCopy.pillModeTimer },
+    { value: "clipboard", label: settingsCopy.pillModeClipboard, title: settingsCopy.pillModeClipboard },
+  ];
+
+  return (
+    <div aria-label={settingsCopy.pillModeShortcutsLabel} className="pill-mode-shortcuts" role="group">
+      {modes.map((item) => (
+        <button
+          aria-pressed={mode === item.value}
+          aria-label={item.label}
+          className="pill-mode-shortcut"
+          key={item.value}
+          onClick={(event) => { event.stopPropagation(); onSelect(item.value); }}
+          title={item.title}
+          type="button"
+        ><span className="pill-mode-icon-frame"><PillModeShortcutIcon mode={item.value} /></span></button>
+      ))}
+    </div>
+  );
+}
+
+function PanelModeToolbar({ mode, onSelectMode, onOpenSettings }: {
+  mode: PillMode;
+  onSelectMode: (mode: PillMode) => void;
+  onOpenSettings: () => void;
+}) {
+  return (
+    <div className="panel-heading panel-mode-toolbar">
+      <PillModeShortcuts mode={mode} onSelect={onSelectMode} />
+      <button onClick={(event) => { event.stopPropagation(); onOpenSettings(); }} type="button">
+        {settingsCopy.open}
+      </button>
+    </div>
+  );
+}
+
+function ClipboardPanel({ history, loading, error, mockPreview, mode, onSelectMode, onOpenSettings, onDelete, onClear }: {
+  history: ClipboardEntry[];
+  loading: boolean;
+  error: string;
+  mockPreview: boolean;
+  mode: PillMode;
+  onSelectMode: (mode: PillMode) => void;
+  onOpenSettings: () => void;
+  onDelete: (id: string) => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="utility-panel clipboard-panel" onClick={(event) => event.stopPropagation()}>
+      <PanelModeToolbar mode={mode} onSelectMode={onSelectMode} onOpenSettings={onOpenSettings} />
+      <div className="clipboard-panel-heading">
+        <div className="clipboard-panel-heading-copy">
+          <h4 className="panel-mode-title">{settingsCopy.clipboardTitle}</h4>
+          <span>{settingsCopy.clipboardCount(history.length)}</span>
+        </div>
+        {history.length > 0 && <button className="clipboard-clear-button" onClick={(event) => { event.stopPropagation(); onClear(); }} type="button">{settingsCopy.clearHistory}</button>}
+      </div>
+      <p className="utility-hint">{settingsCopy.clipboardHint}</p>
+      {mockPreview && <p className="utility-mock-note">{settingsCopy.mockPreview}</p>}
+      {loading && <p className="utility-state" role="status">{settingsCopy.clipboardLoading}</p>}
+      {error && <p className="utility-state utility-error" role="alert">{error}</p>}
+      {history.length === 0 && !loading && <p className="clipboard-empty-state">{settingsCopy.clipboardEmpty}</p>}
+      <ol className="clipboard-history-list">
+        {history.map((entry) => <li className="clipboard-history-item" key={entry.id}>
+          <div className="clipboard-item-heading">
+            <time dateTime={new Date(entry.copiedAt).toISOString()}>{settingsCopy.reminderAt(new Date(entry.copiedAt))}</time>
+            <button aria-label={`${settingsCopy.removeClipboardEntry}: ${settingsCopy.reminderAt(new Date(entry.copiedAt))}`} onClick={(event) => { event.stopPropagation(); onDelete(entry.id); }} title={settingsCopy.removeClipboardEntry} type="button">
+              <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4.5 6h11M7 6V4.5h6V6m-7 0 .6 9.5h6.8L14 6M8.5 8.5v4.5m3-4.5v4.5" /></svg>
+            </button>
+          </div>
+          <pre className="clipboard-preview" tabIndex={0}>{entry.text}</pre>
+        </li>)}
+      </ol>
+    </div>
+  );
+}
+
+type AgentTaskGroup = { name: string; rows: DemoTask[] };
+
+function LocalCalendar({ reminders, nowMs }: { reminders: Reminder[]; nowMs: number }) {
+  const [month, setMonth] = useState(() => new Date(new Date(nowMs).getFullYear(), new Date(nowMs).getMonth(), 1));
+  const [selectedDay, setSelectedDay] = useState(() => localDayKey(new Date(nowMs)));
+  const days = calendarDays(month);
+  const weekdayNames = Array.from({ length: 7 }, (_, index) =>
+    new Intl.DateTimeFormat(undefined, { weekday: "short" }).format(new Date(2024, 0, index + 1)));
+  const selectedDate = days.find((day) => localDayKey(day) === selectedDay) ?? new Date(nowMs);
+  const selectedReminders = reminders.filter((reminder) => localDayKey(new Date(reminder.dueAt)) === selectedDay);
+  const moveMonth = (offset: number) => {
+    const next = new Date(month.getFullYear(), month.getMonth() + offset, 1);
+    setMonth(next);
+    setSelectedDay(localDayKey(next));
+  };
+  return (
+    <section aria-label={settingsCopy.calendar} className="local-calendar">
+      <div className="calendar-heading">
+        <div className="calendar-heading-copy">
+          <span>{settingsCopy.calendar}</span>
+          <h4>{new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }).format(month)}</h4>
+        </div>
+        <div className="calendar-navigation">
+          <button aria-label={settingsCopy.previousMonth} onClick={(event) => { event.stopPropagation(); moveMonth(-1); }} type="button">
+            <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m9.5 3.5-4 4.5 4 4.5" /></svg>
+          </button>
+          <button aria-label={settingsCopy.nextMonth} onClick={(event) => { event.stopPropagation(); moveMonth(1); }} type="button">
+            <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m6.5 3.5 4 4.5-4 4.5" /></svg>
+          </button>
+        </div>
+      </div>
+      <div className="calendar-grid">
+        {weekdayNames.map((name) => <span className="calendar-weekday" key={name}>{name}</span>)}
+        {days.map((day) => {
+          const key = localDayKey(day);
+          const count = reminders.filter((reminder) => localDayKey(new Date(reminder.dueAt)) === key).length;
+          return <button
+            aria-label={`${new Intl.DateTimeFormat(undefined, { dateStyle: "full" }).format(day)}${count ? ` · ${settingsCopy.calendarReminderCount(count)}` : ""}`}
+            aria-pressed={selectedDay === key}
+            className={`${day.getMonth() !== month.getMonth() ? "outside-month " : ""}${key === localDayKey(new Date(nowMs)) ? "today" : ""}`}
+            key={key}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (day.getMonth() !== month.getMonth()) setMonth(new Date(day.getFullYear(), day.getMonth(), 1));
+              setSelectedDay(key);
+            }}
+            type="button"
+          ><span>{day.getDate()}</span>{count > 0 && <span aria-hidden="true" className="calendar-reminder-mark" />}</button>;
+        })}
+      </div>
+      <div className="calendar-day-detail">
+        <div className="calendar-day-heading">
+          <b>{new Intl.DateTimeFormat(undefined, { weekday: "long", day: "numeric", month: "short" }).format(selectedDate)}</b>
+          {selectedReminders.length > 0 && <small>{settingsCopy.calendarReminderCount(selectedReminders.length)}</small>}
+        </div>
+        {selectedReminders.length > 0 ? selectedReminders.map((reminder) => <p key={reminder.id}><span aria-hidden="true" className="calendar-detail-mark" /><span><b>{reminder.title}</b><small>{settingsCopy.reminderAt(new Date(reminder.dueAt))}</small></span></p>)
+          : <p>{settingsCopy.calendarNoReminders}</p>}
+      </div>
+    </section>
+  );
+}
+
+function ChatNotificationRow({ message, index, exiting, onDismiss }: {
+  message: DemoMessage;
+  index: number;
+  exiting: boolean;
+  onDismiss: (id: string) => void;
+}) {
+  return (
+    <div className={`row message-row${exiting ? " row-exit" : ""}`} key={message.id} style={{ "--row-index": index } as CSSProperties}>
+      <div className="avatar whatsapp-avatar" style={{ "--avatar-hue": avatarHue(message.sender) } as CSSProperties}>{initials(message.sender)}</div>
+      <div className="tx">
+        <b>{message.sender}</b>
+        <span>{message.body}</span>
+      </div>
+      <button
+        aria-label={settingsCopy.dismissNotification}
+        className="message-dismiss"
+        onClick={(event) => {
+          event.stopPropagation();
+          onDismiss(message.id);
+        }}
+        title={settingsCopy.dismissNotification}
+        type="button"
+      >×</button>
+    </div>
+  );
+}
+
+function AgentPanel({ attentionGroups, runningGroups, recentTasks, nowMs, onClearHistory }: {
+  attentionGroups: AgentTaskGroup[];
+  runningGroups: AgentTaskGroup[];
+  recentTasks: Array<TaskHistoryEntry & { detail?: string }>;
+  nowMs: number;
+  onClearHistory: () => void;
+}) {
+  const runningCount = runningGroups.reduce((count, group) => count + group.rows.length, 0);
+  const attentionCount = attentionGroups.reduce((count, group) => count + group.rows.length, 0);
+
+  const renderTaskGroups = (groups: AgentTaskGroup[], allowFocus: boolean) => groups.map((group) => (
+    <div className="agent-panel-group" key={group.name}>
+      <h5 className="agent-panel-group-title">{group.name}</h5>
+      {group.rows.map((task) => {
+        const elapsed = task.status === "running" ? taskElapsedLabel(task.startedAt, nowMs) : "";
+        const status = task.status === "running" && elapsed
+          ? settingsCopy.taskRunningFor(elapsed)
+          : statusLabels[task.status];
+        const session = group.rows.length > 1 ? settingsCopy.taskSession(task.id.slice(-8)) : "";
+        const focusTask = (event: MouseEvent<HTMLButtonElement>) => {
+          event.stopPropagation();
+          if (task.pid === undefined || !isTauri()) return;
+          void invoke("focus_process", { pid: task.pid }).catch((error: unknown) => {
+            console.warn("Could not focus task window", error);
+          });
+        };
+
+        return (
+          <div className="agent-panel-task" key={task.id}>
+            <Dot status={task.status} />
+            <div className="agent-panel-task-copy">
+              <b title={task.title}>{task.title}</b>
+              <span>{[status, session].filter(Boolean).join(" · ")}</span>
+            </div>
+            {allowFocus && task.pid !== undefined && isTauri() && (
+              <button
+                aria-label={`${settingsCopy.agentPanelFocusApp}: ${group.name}`}
+                className="agent-panel-task-action"
+                onClick={focusTask}
+                type="button"
+              >{settingsCopy.agentPanelFocusApp}</button>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  ));
+
+  return (
+    <div className="agent-panel-content">
+      <section aria-labelledby="agent-activity-heading" className="agent-panel-section">
+        <div className="panel-heading agent-panel-heading">
+          <h4 id="agent-activity-heading">{settingsCopy.agentPanelHeading}</h4>
+          <span>{settingsCopy.agentPanelTaskSummary(runningCount, attentionCount)}</span>
+        </div>
+        {attentionGroups.length > 0 && (
+          <div className="agent-panel-subsection">
+            <h5 className="agent-panel-subheading">{settingsCopy.agentPanelNeedsAttention}</h5>
+            {renderTaskGroups(attentionGroups, true)}
+          </div>
+        )}
+        {runningGroups.length > 0 && (
+          <div className="agent-panel-subsection">
+            <h5 className="agent-panel-subheading">{settingsCopy.agentPanelRunning}</h5>
+            {renderTaskGroups(runningGroups, true)}
+          </div>
+        )}
+        {attentionCount + runningCount === 0 && <p className="agent-panel-empty">{settingsCopy.agentPanelNoActiveTasks}</p>}
+      </section>
+
+      <section aria-labelledby="agent-history-heading" className="agent-panel-section">
+        <div className="panel-heading agent-panel-heading">
+          <h4 id="agent-history-heading">{settingsCopy.agentPanelRecentTasks}</h4>
+          {recentTasks.length > 0 && <button onClick={(event) => { event.stopPropagation(); onClearHistory(); }} type="button">{settingsCopy.clearHistory}</button>}
+        </div>
+        <p className="agent-panel-hint">{settingsCopy.agentPanelRecentTasksHint}</p>
+        {recentTasks.length > 0 ? <div className="agent-panel-history-list">{recentTasks.map((task) => (
+          <div className="agent-panel-task agent-panel-history-task" key={`${task.source}:${task.id}`}>
+            <Dot status={task.status} />
+            <div className="agent-panel-task-copy">
+              <small>{[
+                taskGroupName({ ...task, name: "", progress: 0 }, settingsCopy.externalAgents),
+                statusLabels[task.status],
+                settingsCopy.agentPanelTaskUpdatedAt(formatTaskStartedAt(task.updatedAt)),
+              ].join(" · ")}</small>
+              <b>{task.status === "done" && isAgentActivityTitle(task.title)
+                ? settingsCopy.agentPanelCompletedTask : task.title}</b>
+              {task.detail && <p className="agent-panel-task-detail">{task.detail}</p>}
+            </div>
+          </div>
+        ))}</div> : <p className="agent-panel-empty">{settingsCopy.agentPanelNoRecentTasks}</p>}
+      </section>
+
+    </div>
+  );
+}
+
 function App() {
   const isMockMode = import.meta.env.MODE === "mock";
   const [state, dispatch] = useReducer(islandReducer, "idle");
   const [tasks, setTasks] = useState(() => isMockMode ? initialTasks : emptyTasks);
+  const [taskHistory, setTaskHistory] = useState(() => loadTaskHistory(window.localStorage));
+  const [completionDetails, setCompletionDetails] = useState<Record<string, string>>({});
+  const [taskHistoryError, setTaskHistoryError] = useState(false);
+  const [taskDoneUntil, setTaskDoneUntil] = useState<number | null>(null);
   const [messages, setMessages] = useState<DemoMessage[]>(() => isMockMode ? initialMessages : []);
   const [exitingMessages, setExitingMessages] = useState<string[]>([]);
   const [systemMetrics, setSystemMetrics] = useState(initialSystemMetrics);
@@ -257,11 +667,25 @@ function App() {
   const [quietEnvironment, setQuietEnvironment] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<UserSettings>(() => loadSettings(window.localStorage));
+  const selectPillMode = (pillMode: PillMode) => {
+    setSettings((current) => ({
+      ...current,
+      pillMode,
+      ...(pillMode === "music" ? { nowPlayingEnabled: true, nowPlayingPeekEnabled: true } : {}),
+      ...(pillMode === "timer" ? { reminderTimerEnabled: true } : {}),
+    }));
+    if (pillMode === "timer") setClockMs(Date.now());
+  };
   const [reminderTimer, setReminderTimer] = useState<ReminderTimerState>(() =>
     clearFinishedTimer(loadReminderTimer(window.localStorage), Date.now()));
   const [pillNotice, setPillNotice] = useState<PillNotice | null>(null);
+  const [clipboardHistory, setClipboardHistory] = useState(() => loadClipboardHistory(window.localStorage));
+  const [clipboardLoading, setClipboardLoading] = useState(false);
+  const [clipboardError, setClipboardError] = useState("");
   const [reminderTitle, setReminderTitle] = useState("");
   const [reminderDateTime, setReminderDateTime] = useState("");
+  const [reminderDateSelected, setReminderDateSelected] = useState(false);
+  const [reminderSuccess, setReminderSuccess] = useState("");
   const [reminderSchedule, setReminderSchedule] = useState<ReminderSchedule>("after");
   const [reminderDuration, setReminderDuration] = useState("5");
   const [reminderDurationUnit, setReminderDurationUnit] = useState<DurationUnit>("minutes");
@@ -277,8 +701,13 @@ function App() {
   const [notificationPermission, setNotificationPermission] = useState<boolean | null>(null);
   const [monitors, setMonitors] = useState<MonitorOption[]>([]);
   const [nowPlaying, setNowPlaying] = useState<NowPlayingState | null>(null);
+  const [musicVolume, setMusicVolume] = useState<number | null>(null);
   const [mediaTickMs, setMediaTickMs] = useState(Date.now());
+  const volumeCommitTimer = useRef<number | null>(null);
   const eventStore = useRef(new EventStore());
+  const taskStatuses = useRef(new Map<string, DemoStatus>(
+    (isMockMode ? initialTasks : emptyTasks).map((task) => [task.id, task.status]),
+  ));
   const activePeekIds = useRef<string[]>([]);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -296,6 +725,8 @@ function App() {
   const panelRef = useRef<HTMLDivElement>(null);
   const lastAlertedActivityId = useRef<string | null>(null);
   const settingsRef = useRef(settings);
+  const settingsOpenRef = useRef(settingsOpen);
+  settingsOpenRef.current = settingsOpen;
   const peekInfoRef = useRef(peekInfo);
   peekInfoRef.current = peekInfo;
   const lastFinishedTimerId = useRef<string | null>(null);
@@ -305,21 +736,18 @@ function App() {
     ? reminderTimer.reminders.filter((reminder) => !reminder.notified).sort((left, right) => left.dueAt - right.dueAt)[0]
     : undefined;
   const visiblePillNotice = settings.reminderTimerEnabled ? pillNotice : null;
-  const { mode: pillContentMode, showNotice: showModeNotice } = pillPresentation(settings.pillMode, visiblePillNotice !== null);
+  const { mode: pillContentMode, showNotice: showModeNotice, showAmbientActivity } = pillPresentation(settings.pillMode, visiblePillNotice !== null);
   const timerEndedMessageVisible = visiblePillNotice?.kind === "timer-ended" && visiblePillNotice.phase !== "filling";
   const pillNoticeCollapsing = visiblePillNotice?.phase === "collapsing";
   const defaultModeNoticeTakeover = settings.pillMode === "all" && visiblePillNotice !== null && !pillNoticeCollapsing;
   const reminderMessageVisible = visiblePillNotice?.kind === "reminder" && visiblePillNotice.phase !== "filling";
-  const hideDefaultTimerPeek = settings.pillMode === "all" && (
-    (visibleTimer !== null && visiblePillNotice === null)
-    || (visiblePillNotice?.kind === "timer-ended" && visiblePillNotice.phase === "filling")
-  );
   const hasPillActivity = visibleTimer !== null || visiblePillNotice !== null
     || (nextPillReminder !== undefined && visibleTimer === null && visiblePillNotice === null);
-  const hasPillLayoutActivity = hasPillActivity && !pillNoticeCollapsing;
+  const hasPillLayoutActivity = visiblePillNotice !== null && !pillNoticeCollapsing;
   const visiblePillReminder = !visibleTimer && !visiblePillNotice ? nextPillReminder : undefined;
   const hasReminderActivity = visiblePillReminder !== undefined || visiblePillNotice?.kind === "reminder";
-  const showPillProgress = hasPillActivity && (settings.pillMode === "all" || settings.pillMode === "timer");
+  const showPillProgress = (settings.pillMode === "all" && visiblePillNotice !== null)
+    || (showAmbientActivity && hasPillActivity);
   const pillProgress = showPillProgress
     ? visiblePillNotice ? 1 : visibleTimer ? timerProgress(visibleTimer, clockMs)
       : nextPillReminder ? reminderProgress(nextPillReminder, clockMs) : 0
@@ -332,9 +760,17 @@ function App() {
   const agentIntegrationStateRef = useRef(agentIntegrationState);
   agentIntegrationStateRef.current = agentIntegrationState;
   const visibleTasks = tasks.filter((task) => isAgentIntegrationEnabled(task.source, agentIntegrationState));
-  const runningPillTasks = visibleTasks
-    .filter((task) => task.status === "running")
-    .sort((left, right) => (right.startedAt ?? 0) - (left.startedAt ?? 0));
+  const activeAgentPillTasks = visibleTasks
+    .filter((task) => task.status === "needs_input" || task.status === "error" || task.status === "running")
+    .sort((left, right) => {
+      return aiStatusPriority[left.status] - aiStatusPriority[right.status]
+        || (right.startedAt ?? 0) - (left.startedAt ?? 0);
+    });
+  const agentPillTasks = activeAgentPillTasks.length > 0
+    ? activeAgentPillTasks
+    : taskDoneUntil !== null && clockMs < taskDoneUntil
+      ? visibleTasks.filter((task) => task.status === "done").sort((left, right) => (right.startedAt ?? 0) - (left.startedAt ?? 0)).slice(0, 1)
+      : [];
   const showNowPlayingStrip = settings.pillMode === "all"
     && settings.nowPlayingEnabled && settings.nowPlayingPeekEnabled && nowPlaying?.playing === true;
   const liveMediaPosition = nowPlaying ? mediaPositionSeconds(nowPlaying, mediaTickMs) : 0;
@@ -345,8 +781,94 @@ function App() {
     frame: null,
     lastFrame: null,
   });
+  const taskMotionNodes = useRef(new Map<string, HTMLElement>());
+  const taskMotionCallbacks = useRef(new Map<string, (node: HTMLElement | null) => void>());
+  const taskMotionPositions = useRef(new Map<string, number>());
+  const taskMotionRef = (key: string) => {
+    let callback = taskMotionCallbacks.current.get(key);
+    if (!callback) {
+      callback = (node: HTMLElement | null) => {
+        if (node) taskMotionNodes.current.set(key, node);
+        else {
+          taskMotionNodes.current.delete(key);
+          taskMotionCallbacks.current.delete(key);
+        }
+      };
+      taskMotionCallbacks.current.set(key, callback);
+    }
+    return callback;
+  };
 
   useEffect(() => { settingsRef.current = settings; }, [settings]);
+
+  useEffect(() => {
+    if (settings.pillMode !== "clipboard") return;
+    if (isMockMode) {
+      setClipboardHistory((current) => current.length > 0 ? current : addClipboardEntry([], 1, "Mock clipboard item", Date.now()));
+      setClipboardError("");
+      return;
+    }
+    if (!isTauri()) {
+      setClipboardError(settingsCopy.clipboardUnavailable);
+      return;
+    }
+
+    let active = true;
+    let busy = false;
+    let lastSequence: number | null = null;
+    setClipboardLoading(true);
+    setClipboardError("");
+    const refresh = () => {
+      if (busy) return;
+      busy = true;
+      void invoke<{ sequence: number; text: string | null } | null>("read_clipboard_snapshot", { lastSequence })
+        .then((snapshot) => {
+          if (!active) return;
+          if (snapshot) {
+            lastSequence = snapshot.sequence;
+            setClipboardHistory((current) => addClipboardEntry(current, snapshot.sequence, snapshot.text));
+          }
+          setClipboardError("");
+        })
+        .catch(() => { if (active) setClipboardError(settingsCopy.clipboardReadFailed); })
+        .finally(() => { busy = false; if (active) setClipboardLoading(false); });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 500);
+    return () => { active = false; window.clearInterval(timer); setClipboardLoading(false); };
+  }, [settings.pillMode, isMockMode]);
+
+  useEffect(() => {
+    if (!saveClipboardHistory(window.localStorage, clipboardHistory)) {
+      setClipboardError(settingsCopy.clipboardSaveFailed);
+    }
+  }, [clipboardHistory]);
+
+  useLayoutEffect(() => {
+    if (hasNewlyCompletedTask(taskStatuses.current, tasks)) {
+      setTaskDoneUntil(Date.now() + motionTokens.timing.taskDoneMs);
+    }
+    taskStatuses.current = new Map(tasks.map((task) => [task.id, task.status]));
+  }, [tasks]);
+
+  useEffect(() => {
+    setTaskHistory((current) => tasks.reduce((history, task) => upsertTaskHistory(history, task), current));
+  }, [tasks]);
+
+  useEffect(() => {
+    setTaskHistoryError(!saveTaskHistory(window.localStorage, taskHistory));
+  }, [taskHistory]);
+
+  useEffect(() => {
+    if (taskDoneUntil === null) return;
+    const remainingMs = taskDoneUntil - Date.now();
+    if (remainingMs <= 0) {
+      setTaskDoneUntil(null);
+      return;
+    }
+    const timer = window.setTimeout(() => setTaskDoneUntil(null), remainingMs);
+    return () => window.clearTimeout(timer);
+  }, [taskDoneUntil]);
 
   const reportHitArea = useCallback(() => {
     if (!isTauri()) return;
@@ -368,8 +890,8 @@ function App() {
       return;
     }
 
-    if (!hoverExpanded.current || clickPinned.current) return;
-    if (hoverLeaveTimer.current !== null) window.clearTimeout(hoverLeaveTimer.current);
+    if (!shouldScheduleHoverCollapse(stateRef.current, hoverExpanded.current, clickPinned.current, settingsOpenRef.current)) return;
+    if (hoverLeaveTimer.current !== null) return;
     hoverLeaveTimer.current = window.setTimeout(() => {
       hoverExpanded.current = false;
       hoverLeaveTimer.current = null;
@@ -853,6 +1375,45 @@ function App() {
     return () => window.clearInterval(timer);
   }, [nowPlaying?.playing]);
 
+  useEffect(() => {
+    if (settings.pillMode !== "music" || state !== "expanded" || settingsOpen || !nowPlaying) {
+      setMusicVolume(null);
+      return;
+    }
+    if (isMockMode) {
+      setMusicVolume(64);
+      return;
+    }
+    if (!isTauri()) return;
+    let active = true;
+    const refresh = () => {
+      if (volumeCommitTimer.current !== null) return;
+      void invoke<number | null>("music_session_volume", { allowBrowserMedia: settings.nowPlayingBrowserMediaEnabled })
+        .then((level) => { if (active) setMusicVolume(level); })
+        .catch(() => { if (active) setMusicVolume(null); });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 2500);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [settings.pillMode, settings.nowPlayingBrowserMediaEnabled, settingsOpen, state, nowPlaying?.title, isMockMode]);
+
+  useEffect(() => () => {
+    if (volumeCommitTimer.current !== null) window.clearTimeout(volumeCommitTimer.current);
+  }, []);
+
+  const changeMusicVolume = (level: number) => {
+    setMusicVolume(level);
+    if (isMockMode || !isTauri()) return;
+    if (volumeCommitTimer.current !== null) window.clearTimeout(volumeCommitTimer.current);
+    volumeCommitTimer.current = window.setTimeout(() => {
+      volumeCommitTimer.current = null;
+      void invoke<number | null>("set_music_session_volume", {
+        level,
+        allowBrowserMedia: settings.nowPlayingBrowserMediaEnabled,
+      }).then(setMusicVolume).catch(() => setMusicVolume(null));
+    }, 150);
+  };
+
   const controlNowPlaying = (action: "play" | "pause" | "previous" | "next") => {
     const updatePlaybackState = () => {
       setNowPlaying((current) => {
@@ -927,7 +1488,6 @@ function App() {
             : `${agentDisplayName(payload.agent)} · ${payload.id.slice(0, 8)}`,
           status: payload.status,
           title: payload.status === "running" ? agentActivityLabel(payload.title) : payload.title,
-          ...(payload.body ? { detail: payload.body } : {}),
           progress: payload.progress ?? (payload.status === "done" ? 1 : 0),
           ...(payload.startedAt && Number.isFinite(Date.parse(payload.startedAt))
             ? { startedAt: Date.parse(payload.startedAt) }
@@ -936,6 +1496,18 @@ function App() {
           ...(payload.cwd ? { cwd: payload.cwd } : {}),
           ...(payload.usage ? { usage: payload.usage } : {}),
         };
+        const detailKey = `${task.source}:${task.id}`;
+        if (task.status === "running") {
+          setCompletionDetails((current) => {
+            if (!(detailKey in current)) return current;
+            const next = { ...current };
+            delete next[detailKey];
+            return next;
+          });
+        } else if (task.status === "done" && task.source === "codex") {
+          const detail = taskCompletionPreview(payload.body);
+          if (detail) setCompletionDetails((current) => ({ ...current, [detailKey]: detail }));
+        }
         setTasks((current) => upsertTask(current, task));
       }
       if (payload.source === "chat" && payload.kind === "message") {
@@ -1064,12 +1636,8 @@ function App() {
       radius = motionTokens.geometry.peek.radius;
     } else {
       width = showNowPlayingStrip
-        ? visibleTimer ? motionTokens.geometry.activityWidth.withNowPlayingAndTimer
-          : hasPillLayoutActivity ? motionTokens.geometry.activityWidth.withNowPlayingAndTimer
-            : motionTokens.geometry.activityWidth.withNowPlaying
-        : (visiblePillNotice?.kind === "reminder" || hasReminderActivity) && !pillNoticeCollapsing ? motionTokens.geometry.activityWidth.reminder
-          : visibleTimer || (visiblePillNotice?.kind === "timer-ended" && !pillNoticeCollapsing) ? motionTokens.geometry.activityWidth.timer
-            : motionTokens.geometry.idle.width;
+        ? motionTokens.geometry.activityWidth.withNowPlaying
+        : motionTokens.geometry.idle.width;
       const hasActivity = showNowPlayingStrip || hasPillLayoutActivity;
       height = defaultModeNoticeTakeover || hasActivity ? motionTokens.geometry.peek.height : motionTokens.geometry.idle.height;
       radius = defaultModeNoticeTakeover || hasActivity ? motionTokens.geometry.peek.radius : motionTokens.geometry.idle.radius;
@@ -1092,6 +1660,9 @@ function App() {
           const geometrySpring = pillNoticeCollapsing && settings.pillMode === "all"
             ? motionTokens.spring.timerCollapse
             : motionTokens.spring.morph;
+          const noticeHeightSpring = defaultModeNoticeTakeover && previousState === "expanded"
+            ? motionTokens.spring.noticeTakeover
+            : geometrySpring;
           shape.width = retargetSpringAxis(shape.width, width);
           shape.height = retargetSpringAxis(shape.height, height);
           shape.radius = retargetSpringAxis(shape.radius, radius);
@@ -1119,7 +1690,7 @@ function App() {
           const deltaSeconds = shape.lastFrame === null ? 1 / 60 : (now - shape.lastFrame) / 1000;
           shape.lastFrame = now;
           shape.width = advanceSpringAxis(shape.width, deltaSeconds, geometrySpring);
-          shape.height = advanceSpringAxis(shape.height, deltaSeconds, geometrySpring);
+          shape.height = advanceSpringAxis(shape.height, deltaSeconds, noticeHeightSpring);
           shape.radius = advanceSpringAxis(shape.radius, deltaSeconds, geometrySpring);
           applyShape();
 
@@ -1135,7 +1706,8 @@ function App() {
     };
 
     const isLeavingContent = state === "idle" && (previousState === "peek" || previousState === "expanded");
-    if (isLeavingContent) {
+    const noticeTakesOverExpandedPanel = defaultModeNoticeTakeover && previousState === "expanded";
+    if (isLeavingContent && !noticeTakesOverExpandedPanel) {
       collapseDelayTimer.current = window.setTimeout(() => {
         collapseDelayTimer.current = null;
         startAnimation();
@@ -1143,10 +1715,10 @@ function App() {
       return;
     }
     startAnimation();
-  }, [state, tasks, messages, peekInfo, systemMetrics, settingsOpen, settings.reminderTimerEnabled, settings.pillMode, reminderTimer, pillNotice, activityError, showNowPlayingStrip, nowPlaying, visibleTimer, hasPillActivity, hasReminderActivity, runningPillTasks.length, clockMs, reportHitArea]);
+  }, [state, tasks, messages, peekInfo, systemMetrics, settingsOpen, settings.reminderTimerEnabled, settings.pillMode, reminderTimer, pillNotice, activityError, showNowPlayingStrip, nowPlaying, visibleTimer, hasPillActivity, hasReminderActivity, clockMs, reportHitArea]);
 
-  const codexRows = settings.codexEnabled ? primaryCodexTaskRows(visibleTasks) : [];
-  const codex = codexRows[0] ?? initialTasks[0];
+  const codexRows = codexTaskRowsForPanel(visibleTasks, settings.codexEnabled, settingsCopy.noActiveTask);
+  const codex = codexRows[0] ?? emptyTasks[0];
   const claudeTasks = visibleTasks.filter((task) => task.source === "claude");
   const activeClaudeTasks = claudeTasks
     .filter((task) => task.status === "running" || task.status === "needs_input")
@@ -1182,13 +1754,54 @@ function App() {
       progress: 0,
     });
   }
-  const taskGroups = [
-    ...(settings.codexEnabled ? [{ name: "Codex", rows: codexRows.length > 0 ? codexRows : [codex] }] : []),
-    ...(claudeRows.length > 0 ? [{ name: "Claude", rows: claudeRows }] : []),
-    ...(antigravityRows.length > 0 ? [{ name: "Antigravity", rows: antigravityRows }] : []),
-    ...(externalTasks.length > 0 ? [{ name: settingsCopy.externalAgents, rows: externalTasks }] : []),
-  ];
-  const aiStatus = aggregateTaskStatus(visibleTasks);
+  const taskGroups = groupTasksByAgent(
+    [...codexRows, ...claudeRows, ...antigravityRows, ...externalTasks],
+    settingsCopy.externalAgents,
+  );
+  const agentNeedsAttentionTasks = visibleTasks
+    .filter((task) => task.status === "needs_input" || task.status === "error")
+    .sort((left, right) => {
+      return aiStatusPriority[left.status] - aiStatusPriority[right.status]
+        || (right.startedAt ?? 0) - (left.startedAt ?? 0);
+    });
+  const agentRunningTasks = visibleTasks
+    .filter((task) => task.status === "running")
+    .sort((left, right) => (right.startedAt ?? 0) - (left.startedAt ?? 0));
+  const recentAgentTasks = taskHistory
+    .filter((task) => isAgentIntegrationEnabled(task.source, agentIntegrationState))
+    .map((task) => ({ ...task, detail: task.status === "done" ? completionDetails[`${task.source}:${task.id}`] : undefined }));
+  const agentNeedsAttentionGroups = groupTasksByAgent(agentNeedsAttentionTasks, settingsCopy.externalAgents);
+  const agentRunningGroups = groupTasksByAgent(agentRunningTasks, settingsCopy.externalAgents);
+  const taskMotionLayoutKey = taskGroups
+    .map((group) => `${group.name}:${group.rows.map((task) => task.id).join(",")}`)
+    .join("|");
+  useLayoutEffect(() => {
+    const activeKeys = new Set(taskGroups.flatMap((group) => group.rows.map((task) => `task:${task.id}`)));
+    if (state !== "expanded" || settingsOpen) {
+      taskMotionPositions.current.clear();
+      return;
+    }
+
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const nextPositions = new Map<string, number>();
+    for (const [key, node] of taskMotionNodes.current) {
+      if (!node.isConnected || !activeKeys.has(key)) continue;
+      const top = node.getBoundingClientRect().top;
+      const previousTop = taskMotionPositions.current.get(key);
+      if (!reducedMotion && previousTop !== undefined && Math.abs(previousTop - top) > 1) {
+        node.animate(
+          [
+            { translate: `0px ${previousTop - top}px` },
+            { translate: "0px 0px" },
+          ],
+          { duration: motionTokens.timing.rowExitMs, easing: "cubic-bezier(0.16, 1, 0.3, 1)" },
+        );
+      }
+      nextPositions.set(key, top);
+    }
+    taskMotionPositions.current = nextPositions;
+  }, [taskMotionLayoutKey, state, settingsOpen]);
+  const aiDotStatus = aggregateTaskDotStatus(visibleTasks, taskDoneUntil);
   const aiHasRunning = visibleTasks.some((task) => task.status === "running");
   const isOpen = state === "expanded";
   const systemLoad = [systemMetrics.current.cpuPercent, systemMetrics.current.gpuPercent]
@@ -1217,10 +1830,12 @@ function App() {
     if (!title || !Number.isFinite(dueAt) || dueAt <= now
       || (reminderSchedule === "after" && durationMs === null)) {
       setActivityError(settingsCopy.reminderInvalid);
+      setReminderSuccess("");
       return;
     }
     if (reminderTimer.reminders.length >= maxReminders) {
       setActivityError(settingsCopy.reminderLimit);
+      setReminderSuccess("");
       return;
     }
     setReminderTimer((current) => ({
@@ -1237,8 +1852,10 @@ function App() {
     }));
     setReminderTitle("");
     setReminderDateTime("");
+    setReminderDateSelected(false);
     setRepeatReminder(false);
     setActivityError("");
+    setReminderSuccess(settingsCopy.reminderAdded(new Date(dueAt)));
     setClockMs(now);
   };
 
@@ -1276,6 +1893,11 @@ function App() {
   const startTask = () => {
     if (!settingsRef.current.codexEnabled) return;
     const startedAt = Date.now();
+    setCompletionDetails((current) => {
+      const next = { ...current };
+      delete next[`codex:${codex.id}`];
+      return next;
+    });
     setTasks((current) => current.map((task) => task.source === "codex"
       ? { ...task, status: "running", title: "database migration", progress: 0.42, startedAt }
       : task));
@@ -1284,6 +1906,10 @@ function App() {
 
   const finishTask = () => {
     if (!settingsRef.current.codexEnabled) return;
+    setCompletionDetails((current) => ({
+      ...current,
+      [`codex:${codex.id}`]: "Completed the database migration and checked the updated schema and queries.",
+    }));
     setTasks((current) => current.map((task) => task.source === "codex"
       ? { ...task, status: "done", progress: 1 }
       : task));
@@ -1347,18 +1973,18 @@ function App() {
     const agentName = agentDisplayName(source);
     const previous = tasks.find((task) => task.id === id);
     const status = previous?.status === "running" ? "done" : "running";
-    setTasks((current) => {
-      return upsertTask(current, {
-        id,
-        source,
-        name: `${agentName} · ${id.slice(0, 8)}`,
-        status,
-        title: `${agentName} task ${status === "running" ? "running" : "completed"}`,
-        progress: status === "done" ? 1 : 0.6,
-        startedAt: previous?.startedAt ?? Date.now(),
-      });
-    });
-    showPeek("ai", agentName, `${agentName} task ${status === "running" ? "running" : "completed"}`, status);
+    const taskTitle = `${agentName} task`;
+    const activity = `${taskTitle} ${status === "running" ? "running" : "completed"}`;
+    setTasks((current) => upsertTask(current, {
+      id,
+      source,
+      name: `${agentName} · ${id.slice(0, 8)}`,
+      status,
+      title: taskTitle,
+      progress: status === "done" ? 1 : 0.6,
+      startedAt: previous?.startedAt ?? Date.now(),
+    }));
+    showPeek("ai", agentName, activity, status);
   };
 
   const showMockClaudeTask = () => {
@@ -1366,7 +1992,8 @@ function App() {
     const previous = tasks.find((task) => task.id === id);
     const status = previous?.status === "running" ? "needs_input"
       : previous?.status === "needs_input" ? "done" : "running";
-    const title = status === "running" ? "Claude is working"
+    const title = "Review a code change";
+    const activity = status === "running" ? "Claude is working"
       : status === "done" ? "Claude task completed" : "Claude is waiting for you";
     setTasks((current) => upsertTask(current, {
       id,
@@ -1377,7 +2004,7 @@ function App() {
       progress: status === "done" ? 1 : 0.6,
       startedAt: previous?.startedAt ?? Date.now(),
     }));
-    showPeek("ai", "Claude", title, status);
+    showPeek("ai", "Claude", activity, status);
   };
 
   const showMockExternalTask = () => {
@@ -1385,7 +2012,8 @@ function App() {
     const previous = tasks.find((task) => task.id === id);
     const status = previous?.status === "running" ? "needs_input"
       : previous?.status === "needs_input" ? "done" : "running";
-    const title = status === "running" ? "Example Agent task running"
+    const title = "Prepare a task summary";
+    const activity = status === "running" ? "Example Agent task running"
       : status === "done" ? "Example Agent task completed" : "Example Agent needs your input";
     setTasks((current) => upsertTask(current, {
       id,
@@ -1396,7 +2024,7 @@ function App() {
       progress: status === "done" ? 1 : 0,
       startedAt: previous?.startedAt ?? Date.now(),
     }));
-    showPeek("ai", "Example Agent", title, status);
+    showPeek("ai", "Example Agent", activity, status);
   };
 
   const showMockReminderTimer = () => {
@@ -1490,9 +2118,9 @@ function App() {
   const showMockNotificationBurst = () => {
     const receivedAt = Date.now();
     const names = ["Rina", "Budi", "Sari", "Dimas", "Nina"];
-    names.forEach((sender, index) => {
+    Array.from({ length: 10 }, (_, index) => names[index % names.length]).forEach((sender, index) => {
       const id = `mock-notification-burst-${receivedAt}-${index}`;
-      const app = index === names.length - 1 ? "Teams" : "WhatsApp";
+      const app = index === 9 ? "Teams" : "WhatsApp";
       const body = `Mock message ${index + 1}`;
       eventStore.current.upsert({
         id,
@@ -1635,12 +2263,14 @@ function App() {
         <div className="tx">
           <b>{group.name}</b>
           {group.rows.map((task) => {
-            const title = task.status === "running" ? task.title : task.detail ?? task.title;
-            const subtitle = task.status === "running"
-              ? `${title} · ${durationLabel(task.startedAt)}`
-              : task.status === "idle"
-                ? title
-                : `${title} · ${statusLabels[task.status]}`;
+            const title = task.title;
+            const elapsed = taskElapsedLabel(task.startedAt, clockMs);
+            const status = task.status === "running"
+              ? elapsed ? settingsCopy.taskRunningFor(elapsed) : statusLabels.running
+              : task.status === "idle" ? "" : statusLabels[task.status];
+            const session = group.rows.length > 1 ? settingsCopy.taskSession(task.id.slice(-8)) : "";
+            const subtitle = [status, session].filter(Boolean).join(" · ");
+            const summary = <TaskSummaryCopy signature={`${task.status}:${title}`} title={title} meta={subtitle} />;
             const focusTask = () => {
               if (!isTauri() || task.pid === undefined) return;
               void invoke("focus_process", { pid: task.pid }).catch((error: unknown) => {
@@ -1648,13 +2278,17 @@ function App() {
               });
             };
 
-            return (
-              <button className="task-summary" disabled={task.pid === undefined || !isTauri()} key={task.id} onClick={(event) => {
+            return task.pid !== undefined && isTauri() ? (
+              <button className="task-summary" key={task.id} onClick={(event) => {
                 event.stopPropagation();
                 focusTask();
-              }} type="button">
-                <span>{subtitle}</span>
+              }} ref={taskMotionRef(`task:${task.id}`)} type="button">
+                {summary}
               </button>
+            ) : (
+              <div className="task-summary task-summary-static" key={task.id} ref={taskMotionRef(`task:${task.id}`)}>
+                {summary}
+              </div>
             );
           })}
         </div>
@@ -1694,7 +2328,7 @@ function App() {
           <span
             aria-hidden="true"
             className="pill-progress-fill"
-            data-wave={showsPillWave(pillProgress, visiblePillNotice?.phase) ? "true" : undefined}
+            data-wave={showAmbientActivity && showsPillWave(pillProgress, visiblePillNotice?.phase) ? "true" : undefined}
           />
         )}
         <div className="hud-content">
@@ -1715,39 +2349,13 @@ function App() {
                 <span className="now-playing-peek" title={`${settingsCopy.nowPlaying}: ${nowPlaying.title}`}>
                   <MusicBars playing={nowPlaying.playing} />
                   <span className="now-playing-copy">
-                    <b>{nowPlaying.title}</b>
+                    <ScrollingSongTitle key={nowPlaying.title} title={nowPlaying.title} />
                     <small><span>{nowPlaying.artist}</span><time aria-live="off" className="now-playing-position">{settingsCopy.musicPosition(liveMediaPosition)}</time></small>
                   </span>
                 </span>
               )}
-              {(visibleTimer || visiblePillNotice || visiblePillReminder) && (
-                <span
-                  className={`activity-peek timer-peek${visiblePillNotice || (visibleTimer && visibleTimerMs === 0) ? " is-due" : ""}${hideDefaultTimerPeek ? " timer-peek-visually-hidden" : ""}`}
-                  title={timerEndedMessageVisible ? settingsCopy.timerEnded
-                    : visiblePillNotice?.kind === "timer-ended" ? `${settingsCopy.timer}: 0:00`
-                      : visiblePillNotice?.kind === "reminder" && reminderMessageVisible ? `${settingsCopy.reminder}: ${visiblePillNotice.title}`
-                        : visiblePillNotice?.kind === "reminder" ? settingsCopy.reminder
-                      : visiblePillReminder ? `${settingsCopy.reminder}: ${visiblePillReminder.title}`
-                      : `${settingsCopy.timer}: ${visibleTimer && visibleTimer.remainingMs !== null ? settingsCopy.timerPaused : formatCountdown(visibleTimerMs)}`}
-                  aria-label={timerEndedMessageVisible ? settingsCopy.timerEnded
-                    : visiblePillNotice?.kind === "timer-ended" ? `${settingsCopy.timer}: 0:00`
-                      : visiblePillNotice?.kind === "reminder" && reminderMessageVisible ? `${settingsCopy.reminder}: ${visiblePillNotice.title}`
-                        : visiblePillNotice?.kind === "reminder" ? settingsCopy.reminder
-                      : visiblePillReminder ? `${settingsCopy.reminder}: ${visiblePillReminder.title}`
-                      : `${settingsCopy.timer}: ${visibleTimer && visibleTimer.remainingMs !== null ? settingsCopy.timerPaused : formatCountdown(visibleTimerMs)}`}
-                  aria-live="off"
-                >
-                  <b key={visiblePillNotice ? `${visiblePillNotice.id}:${visiblePillNotice.phase}` : "activity"}>{timerEndedMessageVisible ? settingsCopy.timerEnded
-                    : visiblePillNotice?.kind === "timer-ended" ? settingsCopy.timer
-                    : visiblePillNotice?.kind === "reminder" || visiblePillReminder ? settingsCopy.reminder : settingsCopy.timer}</b>
-                  {reminderMessageVisible && visiblePillNotice?.kind === "reminder" ? <span>{visiblePillNotice.title}</span>
-                    : visiblePillReminder ? <span>{visiblePillReminder.title}</span>
-                    : visiblePillNotice?.kind === "timer-ended" && !timerEndedMessageVisible ? <span>0:00</span>
-                      : visibleTimer && !visiblePillNotice ? <ActivityCountdown milliseconds={visibleTimerMs} /> : null}
-                </span>
-              )}
               <Dot
-                status={aiHasRunning ? "running" : aiStatus}
+                status={aiHasRunning ? "running" : aiDotStatus}
                 pulse={pulseSource === "ai" || pulseSource === "codex"}
                 className={aiHasRunning ? "active" : ""}
               />
@@ -1760,7 +2368,7 @@ function App() {
               {nowPlaying ? (
                 <>
                   <div className="music-mode-copy">
-                    <b title={nowPlaying.title}>{nowPlaying.title}</b>
+                    <ScrollingSongTitle key={nowPlaying.title} title={nowPlaying.title} />
                     <span title={nowPlaying.artist}>{nowPlaying.artist}</span>
                   </div>
                   <time aria-live="off" className="music-mode-position">{settingsCopy.musicPosition(liveMediaPosition)}</time>
@@ -1769,11 +2377,13 @@ function App() {
             </div>
           ) : pillContentMode === "agents" ? (
             <div className="agent-mode-list">
-              {runningPillTasks.slice(0, 1).map((task) => (
+              {agentPillTasks.slice(0, 1).map((task) => (
                 <button
+                  aria-label={`${task.name.split(" · ")[0]} · ${statusLabels[task.status]} · ${task.title}`}
                   className="agent-mode-row"
                   disabled={task.pid === undefined || !isTauri()}
                   key={task.id}
+                  title={`${statusLabels[task.status]}: ${task.title}`}
                   onClick={(event) => {
                     event.stopPropagation();
                     if (task.pid !== undefined && isTauri()) {
@@ -1782,15 +2392,23 @@ function App() {
                   }}
                   type="button"
                 >
-                  <Dot status="running" />
+                  <Dot status={task.status} />
                   <b>{task.name.split(" · ")[0]}</b>
                   <span title={task.title}>{task.title}</span>
                 </button>
               ))}
-              {runningPillTasks.length === 0 && <span className="mode-pill-empty">{settingsCopy.noRunningAgents}</span>}
-              {runningPillTasks.length > 1 && (
-                <span className="agent-mode-overflow">{settingsCopy.moreUpdates(runningPillTasks.length - 1)}</span>
+              {agentPillTasks.length === 0 && <span className="mode-pill-empty">{settingsCopy.agentPanelNoActiveTasks}</span>}
+              {agentPillTasks.length > 1 && (
+                <span className="agent-mode-overflow">{settingsCopy.moreUpdates(agentPillTasks.length - 1)}</span>
               )}
+            </div>
+          ) : pillContentMode === "clipboard" ? (
+            <div className="pill-mode-content utility-mode">
+              <ClipboardModeIcon />
+              <div className="utility-mode-copy">
+                <b>{settingsCopy.pillModeClipboard}</b>
+                <span>{settingsCopy.clipboardCount(clipboardHistory.length)}</span>
+              </div>
             </div>
           ) : (
             <div className="pill-mode-content timer-mode">
@@ -1904,6 +2522,7 @@ function App() {
         <div
           className="layer panel"
           onClick={settingsOpen ? (event) => event.stopPropagation() : undefined}
+          onPointerLeave={() => updateHoverRegion(false)}
           ref={panelRef}
         >
           {settingsOpen ? (
@@ -1917,25 +2536,6 @@ function App() {
               </div>
               <section aria-labelledby="settings-overlay-heading" className="settings-section">
                 <h5 className="settings-section-title" id="settings-overlay-heading">{settingsCopy.overlaySection}</h5>
-                <label className="setting-field">
-                  <span>{settingsCopy.pillView}</span>
-                  <select value={settings.pillMode} onChange={(event) => {
-                    const pillMode = event.currentTarget.value as PillMode;
-                    setSettings((current) => ({
-                      ...current,
-                      pillMode,
-                      ...(pillMode === "music" ? { nowPlayingEnabled: true, nowPlayingPeekEnabled: true } : {}),
-                      ...(pillMode === "timer" ? { reminderTimerEnabled: true } : {}),
-                    }));
-                    if (pillMode === "timer") setClockMs(Date.now());
-                  }}>
-                    <option value="all">{settingsCopy.pillModeAll}</option>
-                    <option value="music">{settingsCopy.pillModeMusic}</option>
-                    <option value="agents">{settingsCopy.pillModeAgents}</option>
-                    <option value="timer">{settingsCopy.pillModeTimer}</option>
-                  </select>
-                  <small className="setting-field-hint">{settingsCopy.pillViewHint}</small>
-                </label>
                 <label className="setting-field">
                   <span>{settingsCopy.position}</span>
                   <select value={settings.corner} onChange={(event) => setSettings((current) => ({ ...current, corner: event.target.value as UserSettings["corner"] }))}>
@@ -2037,83 +2637,6 @@ function App() {
                   setActivityError("");
                   setClockMs(Date.now());
                 }} />
-                {settings.reminderTimerEnabled && (
-                  <div className="reminder-timer-settings">
-                    <h5>{settingsCopy.reminder}</h5>
-                    <form onSubmit={(event) => { event.preventDefault(); addReminder(); }}>
-                      <input
-                        aria-label={settingsCopy.reminderTitle}
-                        maxLength={80}
-                        placeholder={settingsCopy.reminderTitle}
-                        value={reminderTitle}
-                        onChange={(event) => setReminderTitle(event.target.value)}
-                      />
-                      <label className="reminder-schedule-mode">
-                        <span>{settingsCopy.reminderSchedule}</span>
-                        <select value={reminderSchedule} onChange={(event) => setReminderSchedule(event.target.value as ReminderSchedule)}>
-                          <option value="after">{settingsCopy.reminderDurationMode}</option>
-                          <option value="at">{settingsCopy.reminderDateMode}</option>
-                        </select>
-                      </label>
-                      {reminderSchedule === "after" ? (
-                        <>
-                          <label>
-                            <span>{settingsCopy.duration}</span>
-                            <div className="duration-field">
-                              <input aria-label={settingsCopy.durationAmount} type="number" min="1" max={reminderDurationUnit === "seconds" ? 86_400 : reminderDurationUnit === "minutes" ? 1_440 : 24} step="1" value={reminderDuration} onChange={(event) => setReminderDuration(event.target.value)} />
-                              <select aria-label={settingsCopy.durationUnit} value={reminderDurationUnit} onChange={(event) => setReminderDurationUnit(event.target.value as DurationUnit)}>
-                                <option value="seconds">{settingsCopy.durationSeconds}</option>
-                                <option value="minutes">{settingsCopy.durationMinutes}</option>
-                                <option value="hours">{settingsCopy.durationHours}</option>
-                              </select>
-                            </div>
-                          </label>
-                          <SettingsSwitch className="reminder-repeat-toggle" label={settingsCopy.repeatReminder} checked={repeatReminder} onChange={setRepeatReminder} />
-                        </>
-                      ) : (
-                        <label className="reminder-date-field">
-                          <span>{settingsCopy.reminderDateTime}</span>
-                          <input type="datetime-local" value={reminderDateTime} onChange={(event) => setReminderDateTime(event.target.value)} />
-                        </label>
-                      )}
-                      <button type="submit">{settingsCopy.addReminder}</button>
-                    </form>
-                    {reminderTimer.reminders.length === 0
-                      ? <p className="activity-empty">{settingsCopy.noReminders}</p>
-                      : <ul className="activity-items">{reminderTimer.reminders.map((reminder) => (
-                        <li key={reminder.id}>
-                          <span><b>{reminder.title}</b><small>{reminderTimingLabel(reminder, clockMs)}</small></span>
-                          <button type="button" aria-label={`${settingsCopy.removeReminder}: ${reminder.title}`} onClick={() => {
-                            setReminderTimer((current) => ({ ...current, reminders: current.reminders.filter((item) => item.id !== reminder.id) }));
-                          }}>×</button>
-                        </li>
-                      ))}</ul>}
-                    <h5>{settingsCopy.timer}</h5>
-                    <form className="timer-form" onSubmit={(event) => { event.preventDefault(); startTimer(); }}>
-                      <label>
-                        <span>{settingsCopy.timerDuration}</span>
-                        <div className="duration-field">
-                          <input aria-label={settingsCopy.durationAmount} type="number" min="1" max={timerDurationUnit === "seconds" ? 86_400 : timerDurationUnit === "minutes" ? 1_440 : 24} step="1" value={timerDuration} onChange={(event) => setTimerDuration(event.target.value)} />
-                          <select aria-label={settingsCopy.durationUnit} value={timerDurationUnit} onChange={(event) => setTimerDurationUnit(event.target.value as DurationUnit)}>
-                            <option value="seconds">{settingsCopy.durationSeconds}</option>
-                            <option value="minutes">{settingsCopy.durationMinutes}</option>
-                            <option value="hours">{settingsCopy.durationHours}</option>
-                          </select>
-                        </div>
-                      </label>
-                      <button type="submit">{settingsCopy.startTimer}</button>
-                    </form>
-                    {visibleTimer ? (
-                      <div className="timer-controls">
-                        <ActivityDial progress={timerProgress(visibleTimer, clockMs)} paused={visibleTimer.remainingMs !== null} />
-                        <span className="timer-control-value"><ActivityCountdown milliseconds={visibleTimerMs} />{visibleTimer.remainingMs !== null && <small>{settingsCopy.timerPaused}</small>}</span>
-                        {visibleTimerMs > 0 && <button type="button" onClick={toggleTimerPause}>{visibleTimer.remainingMs === null ? settingsCopy.pauseTimer : settingsCopy.resumeTimer}</button>}
-                        <button type="button" onClick={() => setReminderTimer((current) => ({ ...current, timer: null }))}>{settingsCopy.cancelTimer}</button>
-                      </div>
-                    ) : <p className="activity-empty">{settingsCopy.timerNone}</p>}
-                    {activityError && <p className="setting-error" role="alert">{activityError}</p>}
-                  </div>
-                )}
               </section>
               <section aria-labelledby="settings-startup-heading" className="settings-section settings-section-last">
                 <h5 className="settings-section-title" id="settings-startup-heading">{settingsCopy.startupSection}</h5>
@@ -2126,22 +2649,56 @@ function App() {
                 }} />
               </section>
             </>
+          ) : settings.pillMode === "clipboard" && state === "expanded" ? (
+            <ClipboardPanel
+              history={clipboardHistory}
+              error={clipboardError}
+              loading={clipboardLoading}
+              mockPreview={isMockMode}
+              mode={settings.pillMode}
+              onSelectMode={selectPillMode}
+              onOpenSettings={() => setSettingsOpen(true)}
+              onDelete={(id) => setClipboardHistory((current) => current.filter((entry) => entry.id !== id))}
+              onClear={() => setClipboardHistory([])}
+            />
           ) : (
             <>
-              <div className="panel-heading">
-              <h4>AI Tasks</h4>
-                <button onClick={(event) => { event.stopPropagation(); setSettingsOpen(true); }}>{settingsCopy.open}</button>
-              </div>
-              {taskGroups.map(taskGroupRow)}
-              {settings.nowPlayingEnabled && (
-                <section aria-label={settingsCopy.nowPlaying} className="now-playing">
+              <PanelModeToolbar mode={settings.pillMode} onSelectMode={selectPillMode} onOpenSettings={() => setSettingsOpen(true)} />
+              {settings.pillMode === "agents" ? (
+                <>
+                <AgentPanel
+                  attentionGroups={agentNeedsAttentionGroups}
+                  runningGroups={agentRunningGroups}
+                  recentTasks={recentAgentTasks}
+                  nowMs={clockMs}
+                  onClearHistory={() => { clearTaskHistory(window.localStorage); setTaskHistory([]); setCompletionDetails({}); }}
+                />
+                {taskHistoryError && <p className="utility-state utility-error" role="alert">{settingsCopy.historySaveFailed}</p>}
+                </>
+              ) : (
+                <>
+              {settings.pillMode === "all" && <>
+                <h4 className="panel-mode-title">AI Tasks</h4>
+                {taskGroups.map(taskGroupRow)}
+              </>}
+              {(settings.pillMode === "all" || settings.pillMode === "music") && settings.nowPlayingEnabled && (
+                <section aria-label={settingsCopy.nowPlaying} className={`now-playing${settings.pillMode === "music" ? " music-panel" : ""}`} data-playing={nowPlaying?.playing ?? false}>
                   <h4>{settingsCopy.nowPlaying}</h4>
                   {nowPlaying ? (
                     <div className="now-playing-card">
                       {nowPlaying.coverDataUrl
                         ? <img alt="" className="now-playing-cover" src={nowPlaying.coverDataUrl} />
                         : <div aria-hidden="true" className="now-playing-cover now-playing-placeholder">♫</div>}
-                      <div className="now-playing-info"><b>{nowPlaying.title}</b><span>{nowPlaying.artist}</span><small>{nowPlaying.playing ? settingsCopy.playing : settingsCopy.paused}</small></div>
+                      <div className="now-playing-info">
+                        <ScrollingSongTitle key={nowPlaying.title} title={nowPlaying.title} />
+                        <span title={nowPlaying.artist}>{nowPlaying.artist}</span>
+                        {settings.pillMode === "music" ? (
+                          <div className="music-card-meta">
+                            <small>{nowPlaying.playing ? settingsCopy.playing : settingsCopy.paused}</small>
+                            <time aria-live="off">{settingsCopy.musicPosition(liveMediaPosition)}</time>
+                          </div>
+                        ) : <small>{nowPlaying.playing ? settingsCopy.playing : settingsCopy.paused}</small>}
+                      </div>
                       <div className="now-playing-actions">
                         <button aria-label={settingsCopy.previousTrack} onClick={(event) => { event.stopPropagation(); controlNowPlaying("previous"); }} type="button">
                           <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M13.5 4.5 6.5 10l7 5.5M4.5 5v10" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" /></svg>
@@ -2161,9 +2718,16 @@ function App() {
                   ) : <p className="now-playing-empty">{settingsCopy.noMedia}</p>}
                 </section>
               )}
-              {settings.reminderTimerEnabled && (reminderTimer.reminders.length > 0 || reminderTimer.timer) && (
+              {settings.pillMode === "music" && (
+                <MusicVolumeControl volume={musicVolume} onChange={changeMusicVolume} />
+              )}
+              {(settings.pillMode === "all" || settings.pillMode === "timer") && settings.reminderTimerEnabled
+                && (settings.pillMode === "timer" || reminderTimer.reminders.length > 0 || reminderTimer.timer) && (
                 <section className="activity-panel" aria-label={settingsCopy.reminderTimer}>
                   <h4>{settingsCopy.reminderTimer}</h4>
+                  {settings.pillMode === "timer" && reminderTimer.reminders.length === 0 && !visibleTimer && (
+                    <p className="activity-empty">{settingsCopy.noActiveRemindersOrTimer}</p>
+                  )}
                   {reminderTimer.reminders.map((reminder) => (
                     <div className="activity-panel-row reminder-panel-row" key={reminder.id}>
                       <ActivityDial progress={reminderProgress(reminder, clockMs)} kind="reminder" complete={reminder.notified} />
@@ -2186,6 +2750,80 @@ function App() {
                   )}
                 </section>
               )}
+              {settings.pillMode === "timer" && <LocalCalendar reminders={reminderTimer.reminders} nowMs={clockMs} />}
+              {settings.pillMode === "timer" && settings.reminderTimerEnabled && (
+                <section aria-label={settingsCopy.createReminderOrTimer} className="reminder-timer-create" onClick={(event) => event.stopPropagation()}>
+                  <h4>{settingsCopy.createReminderOrTimer}</h4>
+                  <h5>{settingsCopy.reminder}</h5>
+                  <form onSubmit={(event) => { event.preventDefault(); addReminder(); }}>
+                    <input
+                      aria-label={settingsCopy.reminderTitle}
+                      maxLength={80}
+                      placeholder={settingsCopy.reminderTitle}
+                      value={reminderTitle}
+                      onChange={(event) => { setReminderTitle(event.target.value); setReminderSuccess(""); }}
+                    />
+                    <label className="reminder-schedule-mode">
+                      <span>{settingsCopy.reminderSchedule}</span>
+                      <select value={reminderSchedule} onChange={(event) => { setReminderSchedule(event.target.value as ReminderSchedule); setReminderSuccess(""); }}>
+                        <option value="after">{settingsCopy.reminderDurationMode}</option>
+                        <option value="at">{settingsCopy.reminderDateMode}</option>
+                      </select>
+                    </label>
+                    {reminderSchedule === "after" ? (
+                      <>
+                        <label>
+                          <span>{settingsCopy.duration}</span>
+                          <div className="duration-field">
+                            <input aria-label={settingsCopy.durationAmount} type="number" min="1" max={reminderDurationUnit === "seconds" ? 86_400 : reminderDurationUnit === "minutes" ? 1_440 : 24} step="1" value={reminderDuration} onChange={(event) => setReminderDuration(event.target.value)} />
+                            <select aria-label={settingsCopy.durationUnit} value={reminderDurationUnit} onChange={(event) => setReminderDurationUnit(event.target.value as DurationUnit)}>
+                              <option value="seconds">{settingsCopy.durationSeconds}</option>
+                              <option value="minutes">{settingsCopy.durationMinutes}</option>
+                              <option value="hours">{settingsCopy.durationHours}</option>
+                            </select>
+                          </div>
+                        </label>
+                        <SettingsSwitch className="reminder-repeat-toggle" label={settingsCopy.repeatReminder} checked={repeatReminder} onChange={setRepeatReminder} />
+                      </>
+                    ) : (
+                      <ReminderDateField
+                        value={reminderDateTime}
+                        selected={reminderDateSelected}
+                        onChange={(value) => { setReminderDateTime(value); setReminderDateSelected(false); setReminderSuccess(""); }}
+                        onDone={() => setReminderDateSelected(Boolean(reminderDateTime))}
+                      />
+                    )}
+                    <button type="submit">{settingsCopy.addReminder}</button>
+                  </form>
+                  <h5>{settingsCopy.timer}</h5>
+                  <form className="timer-form" onSubmit={(event) => { event.preventDefault(); startTimer(); }}>
+                    <label>
+                      <span>{settingsCopy.timerDuration}</span>
+                      <div className="duration-field">
+                        <input aria-label={settingsCopy.durationAmount} type="number" min="1" max={timerDurationUnit === "seconds" ? 86_400 : timerDurationUnit === "minutes" ? 1_440 : 24} step="1" value={timerDuration} onChange={(event) => setTimerDuration(event.target.value)} />
+                        <select aria-label={settingsCopy.durationUnit} value={timerDurationUnit} onChange={(event) => setTimerDurationUnit(event.target.value as DurationUnit)}>
+                          <option value="seconds">{settingsCopy.durationSeconds}</option>
+                          <option value="minutes">{settingsCopy.durationMinutes}</option>
+                          <option value="hours">{settingsCopy.durationHours}</option>
+                        </select>
+                      </div>
+                    </label>
+                    <button type="submit">{settingsCopy.startTimer}</button>
+                  </form>
+                  {activityError && <p className="setting-error" role="alert">{activityError}</p>}
+                  {reminderSuccess && <p className="reminder-success" role="status">{reminderSuccess}</p>}
+                </section>
+              )}
+              {settings.pillMode === "timer" && !settings.reminderTimerEnabled && (
+                <section aria-label={settingsCopy.createReminderOrTimer} className="reminder-timer-create" onClick={(event) => event.stopPropagation()}>
+                  <button onClick={(event) => {
+                    event.stopPropagation();
+                    setSettings((current) => ({ ...current, reminderTimerEnabled: true }));
+                    setClockMs(Date.now());
+                  }} type="button">{settingsCopy.enableReminderTimer}</button>
+                </section>
+              )}
+              {settings.pillMode === "all" && <>
               <div className="panel-heading chat-panel-heading">
                 <h4>Chat{unreadCount > 0 ? ` · ${unreadCount} unread` : ""}</h4>
                 {whatsappMessageCount > 0 && (
@@ -2195,22 +2833,13 @@ function App() {
                 )}
               </div>
               {messages.map((message, index) => (
-                <div className={`row message-row${exitingMessages.includes(message.id) ? " row-exit" : ""}`} key={message.id} style={{ "--row-index": index } as CSSProperties}>
-                  <div className="avatar whatsapp-avatar" style={{ "--avatar-hue": avatarHue(message.sender) } as CSSProperties}>{initials(message.sender)}</div>
-                  <div className="tx">
-                    <b>{message.sender}</b>
-                    <span>{message.body}</span>
-                  </div>
-                  <button
-                    aria-label={settingsCopy.dismissNotification}
-                    className="message-dismiss"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      dismissMessage(message.id);
-                    }}
-                    title={settingsCopy.dismissNotification}
-                  >×</button>
-                </div>
+                <ChatNotificationRow
+                  exiting={exitingMessages.includes(message.id)}
+                  index={index}
+                  key={message.id}
+                  message={message}
+                  onDismiss={dismissMessage}
+                />
               ))}
               <h4>{systemCopy.heading}</h4>
               <div className="system-metrics">
@@ -2221,6 +2850,9 @@ function App() {
                 <SystemMetric label={systemCopy.temperature} value={systemMetrics.current.gpuTemperatureC === null ? systemCopy.unavailable : `${systemMetrics.current.gpuTemperatureC}°C`} samples={systemMetrics.history.map((sample) => ({ capturedAt: sample.capturedAt, value: sample.gpuTemperatureC }))} />
                 {systemMetrics.history.length === 0 && <span className="system-empty">{systemCopy.noSamples}</span>}
               </div>
+              </>}
+                </>
+              )}
             </>
           )}
         </div>

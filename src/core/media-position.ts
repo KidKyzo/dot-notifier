@@ -3,6 +3,7 @@ type MediaSnapshot = {
   artist: string;
   playing: boolean;
   positionSeconds: number;
+  positionUpdatedAtMs?: number | null;
 };
 
 export type LiveMediaPosition = MediaSnapshot & {
@@ -19,19 +20,26 @@ export const syncMediaPosition = <T extends MediaSnapshot>(
   nowMs: number,
 ): T & LiveMediaPosition => {
   const estimated = previous ? mediaPositionSeconds(previous, nowMs) : snapshot.positionSeconds;
+  const positionUpdatedAtMs = snapshot.positionUpdatedAtMs;
+  const timelineAgeSeconds = snapshot.playing
+    && typeof positionUpdatedAtMs === "number"
+    && Number.isFinite(positionUpdatedAtMs)
+    ? Math.floor(Math.max(0, nowMs - positionUpdatedAtMs) / 1_000)
+    : 0;
+  const currentSnapshotPosition = snapshot.positionSeconds + timelineAgeSeconds;
   const keepEstimate = previous !== null
     && previous.title === snapshot.title
     && previous.artist === snapshot.artist
     && previous.playing
     && snapshot.playing
-    && snapshot.positionSeconds >= previous.reportedPositionSeconds
-    && snapshot.positionSeconds <= estimated
-    && (snapshot.positionSeconds === previous.reportedPositionSeconds || estimated - snapshot.positionSeconds <= 3);
+    && currentSnapshotPosition >= previous.reportedPositionSeconds
+    && currentSnapshotPosition <= estimated
+    && (currentSnapshotPosition === previous.reportedPositionSeconds || estimated - currentSnapshotPosition <= 3);
 
   return {
     ...snapshot,
-    positionSeconds: keepEstimate ? estimated : snapshot.positionSeconds,
-    reportedPositionSeconds: snapshot.positionSeconds,
+    positionSeconds: keepEstimate ? estimated : currentSnapshotPosition,
+    reportedPositionSeconds: currentSnapshotPosition,
     sampledAtMs: nowMs,
   };
 };
