@@ -5,6 +5,15 @@ export type IslandAction =
   | { type: "dismiss" }
   | { type: "hover"; active: boolean };
 
+export function shouldScheduleHoverCollapse(
+  state: IslandState,
+  hoverExpanded: boolean,
+  clickPinned: boolean,
+  settingsOpen: boolean,
+): boolean {
+  return !clickPinned && !settingsOpen && (hoverExpanded || state === "expanded");
+}
+
 export function islandReducer(
   state: IslandState,
   action: IslandAction,
