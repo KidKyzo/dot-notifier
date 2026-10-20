@@ -6,7 +6,6 @@ export type DemoTask = {
   name: string;
   status: DemoStatus;
   title: string;
-  detail?: string;
   progress: number;
   startedAt?: number;
   pid?: number;
